@@ -1,0 +1,22 @@
+# Dependencies & package managers
+node_modules
+.pnp
+.pnp.*
+pnpm-lock.yaml
+
+# Next.js build artifacts & production output
+.next
+out
+build
+dist
+
+# Testing & Coverage
+coverage
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Misc / OS
+.DS_Store
+*.pem
