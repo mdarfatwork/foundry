@@ -165,6 +165,15 @@ Foundry's shadcn/ui installation is built on top of **`@base-ui/react`** (`style
   - Used for isolated UI modules and preview surfaces with `bg-card` and `border-border`.
 - **Badges (`components/ui/badge.tsx`):**
   - Compact height (`h-4.5` to `h-5`), monospace metadata, used for status indicators and version labels.
+- **Drawer (`components/ui/drawer.tsx`):**
+  - Mobile bottom-sheet primitive using `@base-ui/react/drawer`.
+  - Features swipe gestures, backdrop blur, and touch drag indicators.
+- **Credenza (`components/ui/credenza.tsx`):**
+  - Responsive dialog/drawer wrapper powered by `@/hooks/use-mobile`.
+  - On desktop (`>= 768px`), renders a centered modal dialog (`Dialog`).
+  - On mobile (`< 768px`), automatically adapts into a bottom-sheet drawer (`Drawer`).
+  - Contains `Credenza`, `CredenzaTrigger`, `CredenzaContent`, `CredenzaHeader`, `CredenzaTitle`, `CredenzaDescription`, `CredenzaBody`, `CredenzaFooter`, `CredenzaClose`, and `useCredenza()`.
+  - Intentionally exports only `Credenza*` primitives without polluting the namespace with `Dialog*` aliases.
 
 ---
 
