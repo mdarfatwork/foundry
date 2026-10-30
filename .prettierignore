@@ -20,3 +20,6 @@ next-env.d.ts
 # Misc / OS
 .DS_Store
 *.pem
+
+# Agents / Skills
+.agents
