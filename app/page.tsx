@@ -1,13 +1,24 @@
 "use client";
 
-import * as React from "react";
+import {
+  useState,
+  useRef,
+  type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import Link from "next/link";
 import { Flame, ArrowUp, Loader2 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 
-interface FoundryLandingPageProps {
+const DEFAULT_SIGN_IN_ROUTE = "/sign-in";
+const MOCK_SUBMISSION_DELAY_MS = 800;
+const TEXTAREA_MIN_HEIGHT_PX = 96;
+const TEXTAREA_MAX_HEIGHT_PX = 260;
+
+type FoundryLandingPageProps = Readonly<{
   /**
    * Route destination for the Sign In button.
    * Defaults to isolated AUTH_SIGN_IN_ROUTE constant.
@@ -17,17 +28,17 @@ interface FoundryLandingPageProps {
    * Optional custom submission handler for when a user submits a prompt.
    */
   onSubmitPrompt?: (prompt: string) => void | Promise<void>;
-}
+}>;
 
 export default function FoundryLandingPage({
-  signInHref = "/sign-in",
+  signInHref = DEFAULT_SIGN_IN_ROUTE,
   onSubmitPrompt,
 }: FoundryLandingPageProps) {
-  const [prompt, setPrompt] = React.useState("");
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const [prompt, setPrompt] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const handleSubmit = async (e?: React.FormEvent) => {
+  const handleSubmit = async (e?: FormEvent) => {
     e?.preventDefault();
     const trimmed = prompt.trim();
     if (!trimmed || isSubmitting) return;
@@ -38,7 +49,9 @@ export default function FoundryLandingPage({
         await onSubmitPrompt(trimmed);
       } else {
         // Subtle generation transition ready for authentication / workspace handoff
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await new Promise((resolve) =>
+          setTimeout(resolve, MOCK_SUBMISSION_DELAY_MS),
+        );
         setPrompt("");
         if (textareaRef.current) {
           textareaRef.current.style.height = "auto";
@@ -49,7 +62,7 @@ export default function FoundryLandingPage({
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -59,11 +72,14 @@ export default function FoundryLandingPage({
     }
   };
 
-  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleTextChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     setPrompt(e.target.value);
     const target = e.target;
     target.style.height = "auto";
-    target.style.height = `${Math.min(Math.max(target.scrollHeight, 96), 260)}px`;
+    target.style.height = `${Math.min(
+      Math.max(target.scrollHeight, TEXTAREA_MIN_HEIGHT_PX),
+      TEXTAREA_MAX_HEIGHT_PX,
+    )}px`;
   };
 
   return (

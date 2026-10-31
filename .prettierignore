@@ -23,3 +23,6 @@ next-env.d.ts
 
 # Agents / Skills
 .agents
+
+# SonarQube
+sonar-project.properties

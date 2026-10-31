@@ -1,6 +1,12 @@
 "use client";
 
-import * as React from "react";
+import { createContext, useContext, useMemo } from "react";
+import type {
+  ComponentProps,
+  HTMLAttributes,
+  ReactElement,
+  ReactNode,
+} from "react";
 import {
   Dialog,
   DialogClose,
@@ -24,35 +30,37 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
-export type CredenzaProps = {
-  children?: React.ReactNode;
-  className?: string;
-  asChild?: boolean;
-  render?: React.ReactElement;
-} & React.HTMLAttributes<HTMLElement>;
+export type CredenzaProps = Readonly<
+  {
+    children?: ReactNode;
+    className?: string;
+    asChild?: boolean;
+    render?: ReactElement;
+  } & HTMLAttributes<HTMLElement>
+>;
 
-export type RootCredenzaProps = {
-  children?: React.ReactNode;
+export type RootCredenzaProps = Readonly<{
+  children?: ReactNode;
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   modal?: boolean;
-};
+}>;
 
 type CredenzaContextProps = {
   isDesktop: boolean;
 };
 
-const CredenzaContext = React.createContext<CredenzaContextProps>({
+const CredenzaContext = createContext<CredenzaContextProps>({
   isDesktop: true,
 });
 
-const useCredenza = () => React.useContext(CredenzaContext);
+const useCredenza = () => useContext(CredenzaContext);
 
 const Credenza = ({ children, ...props }: RootCredenzaProps) => {
   const isMobile = useIsMobile();
   const isDesktop = !isMobile;
-  const contextValue = React.useMemo(() => ({ isDesktop }), [isDesktop]);
+  const contextValue = useMemo(() => ({ isDesktop }), [isDesktop]);
 
   return (
     <CredenzaContext.Provider value={contextValue}>
@@ -71,14 +79,14 @@ const CredenzaTrigger = ({ className, children, ...props }: CredenzaProps) => {
   return isDesktop ? (
     <DialogTrigger
       className={className}
-      {...(props as React.ComponentProps<typeof DialogTrigger>)}
+      {...(props as ComponentProps<typeof DialogTrigger>)}
     >
       {children}
     </DialogTrigger>
   ) : (
     <DrawerTrigger
       className={className}
-      {...(props as React.ComponentProps<typeof DrawerTrigger>)}
+      {...(props as ComponentProps<typeof DrawerTrigger>)}
     >
       {children}
     </DrawerTrigger>
@@ -91,14 +99,14 @@ const CredenzaClose = ({ className, children, ...props }: CredenzaProps) => {
   return isDesktop ? (
     <DialogClose
       className={className}
-      {...(props as React.ComponentProps<typeof DialogClose>)}
+      {...(props as ComponentProps<typeof DialogClose>)}
     >
       {children}
     </DialogClose>
   ) : (
     <DrawerClose
       className={className}
-      {...(props as React.ComponentProps<typeof DrawerClose>)}
+      {...(props as ComponentProps<typeof DrawerClose>)}
     >
       {children}
     </DrawerClose>
@@ -111,14 +119,14 @@ const CredenzaContent = ({ className, children, ...props }: CredenzaProps) => {
   return isDesktop ? (
     <DialogContent
       className={className}
-      {...(props as React.ComponentProps<typeof DialogContent>)}
+      {...(props as ComponentProps<typeof DialogContent>)}
     >
       {children}
     </DialogContent>
   ) : (
     <DrawerContent
       className={className}
-      {...(props as React.ComponentProps<typeof DrawerContent>)}
+      {...(props as ComponentProps<typeof DrawerContent>)}
     >
       {children}
     </DrawerContent>
@@ -135,14 +143,14 @@ const CredenzaDescription = ({
   return isDesktop ? (
     <DialogDescription
       className={className}
-      {...(props as React.ComponentProps<typeof DialogDescription>)}
+      {...(props as ComponentProps<typeof DialogDescription>)}
     >
       {children}
     </DialogDescription>
   ) : (
     <DrawerDescription
       className={className}
-      {...(props as React.ComponentProps<typeof DrawerDescription>)}
+      {...(props as ComponentProps<typeof DrawerDescription>)}
     >
       {children}
     </DrawerDescription>
@@ -169,14 +177,14 @@ const CredenzaTitle = ({ className, children, ...props }: CredenzaProps) => {
   return isDesktop ? (
     <DialogTitle
       className={className}
-      {...(props as React.ComponentProps<typeof DialogTitle>)}
+      {...(props as ComponentProps<typeof DialogTitle>)}
     >
       {children}
     </DialogTitle>
   ) : (
     <DrawerTitle
       className={className}
-      {...(props as React.ComponentProps<typeof DrawerTitle>)}
+      {...(props as ComponentProps<typeof DrawerTitle>)}
     >
       {children}
     </DrawerTitle>

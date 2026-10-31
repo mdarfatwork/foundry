@@ -1,11 +1,13 @@
-import * as React from "react";
+import type { ComponentProps } from "react";
 import { cn } from "cn";
 
-function Card({
-  className,
-  size = "default",
-  ...props
-}: React.ComponentProps<"div"> & { size?: "default" | "sm" }) {
+type CardProps = Readonly<
+  ComponentProps<"div"> & {
+    size?: "default" | "sm";
+  }
+>;
+
+function Card({ className, size = "default", ...props }: CardProps) {
   return (
     <div
       data-slot="card"
@@ -19,7 +21,7 @@ function Card({
   );
 }
 
-function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
+function CardHeader({ className, ...props }: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-header"
@@ -32,7 +34,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+function CardTitle({ className, ...props }: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-title"
@@ -45,7 +47,10 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+function CardDescription({
+  className,
+  ...props
+}: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-description"
@@ -55,7 +60,7 @@ function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardAction({ className, ...props }: React.ComponentProps<"div">) {
+function CardAction({ className, ...props }: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-action"
@@ -68,7 +73,7 @@ function CardAction({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardContent({ className, ...props }: React.ComponentProps<"div">) {
+function CardContent({ className, ...props }: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-content"
@@ -78,7 +83,7 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+function CardFooter({ className, ...props }: Readonly<ComponentProps<"div">>) {
   return (
     <div
       data-slot="card-footer"
