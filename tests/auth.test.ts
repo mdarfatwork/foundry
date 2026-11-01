@@ -11,6 +11,8 @@ import {
   createProjectAction,
   getUserProjectsAction,
   deleteProjectAction,
+  getProjectByIdAction,
+  getProjectByIdForUser,
 } from "@/app/actions/project";
 import * as sessionModule from "@/lib/auth/session";
 
@@ -293,6 +295,43 @@ describe("5. Protected Server Actions & Tenant Isolation", () => {
     if (!result.success) {
       expect(result.code).toBe("UNAUTHORIZED");
     }
+  });
+
+  it("rejects fetching project by ID when unauthenticated", async () => {
+    vi.spyOn(sessionModule, "requireUser").mockRejectedValue(
+      new Error("UNAUTHORIZED"),
+    );
+
+    const result = await getProjectByIdAction("proj_123");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.code).toBe("UNAUTHORIZED");
+    }
+  });
+
+  it("rejects fetching project with invalid project ID", async () => {
+    vi.spyOn(sessionModule, "requireUser").mockResolvedValue({
+      id: "usr_123",
+      name: "Test User",
+      email: "test@example.com",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await getProjectByIdAction("   ");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.code).toBe("INVALID_INPUT");
+    }
+  });
+
+  it("safely handles getProjectByIdForUser with empty inputs", async () => {
+    const res1 = await getProjectByIdForUser("", "usr_123");
+    expect(res1).toBeNull();
+
+    const res2 = await getProjectByIdForUser("proj_123", "");
+    expect(res2).toBeNull();
   });
 });
 

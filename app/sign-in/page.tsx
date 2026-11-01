@@ -53,7 +53,7 @@ export default function SignInPage({ searchParams }: SignInPageProps) {
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       {/* Top Header with Brand & Theme Toggle */}
       <header className="sticky top-0 z-40 w-full border-b border-border/40 bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-4 sm:px-6">
+        <div className="mx-auto flex h-14 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
           <Link
             href="/"
             className="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"

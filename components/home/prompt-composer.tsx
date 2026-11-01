@@ -9,9 +9,10 @@ import {
 } from "react";
 import { ArrowUp, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 const MOCK_SUBMISSION_DELAY_MS = 800;
-const TEXTAREA_MIN_HEIGHT_PX = 96;
+const TEXTAREA_MIN_HEIGHT_PX = 60;
 const TEXTAREA_MAX_HEIGHT_PX = 260;
 
 type PromptComposerProps = Readonly<{
@@ -19,14 +20,26 @@ type PromptComposerProps = Readonly<{
    * Optional custom submission handler for when a user submits a prompt.
    */
   onSubmitPrompt?: (prompt: string) => void | Promise<void>;
+  /**
+   * Custom placeholder text for the prompt input.
+   * Defaults to "What do you want to build?".
+   */
+  placeholder?: string;
+  /**
+   * Optional custom class name applied to the outer container.
+   */
+  className?: string;
 }>;
 
 /**
- * Interactive Prompt Composer component for Foundry home page.
- * Isolated as a leaf Client Component to preserve Server Component streaming at page level.
- * Adheres to AGENTS.md §5.1, §5.3, §5.4, and §5.5.
+ * Minimal, polished Prompt Composer inspired by v0.app.
+ * Adheres to AGENTS.md §5.1, §5.3, §5.4, §5.5, and DESIGN.md.
  */
-export function PromptComposer({ onSubmitPrompt }: PromptComposerProps) {
+export function PromptComposer({
+  onSubmitPrompt,
+  placeholder = "What do you want to build?",
+  className,
+}: PromptComposerProps) {
   const [prompt, setPrompt] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -77,36 +90,28 @@ export function PromptComposer({ onSubmitPrompt }: PromptComposerProps) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="w-full rounded-xl border border-border bg-card/60 dark:bg-card/40 backdrop-blur-xs shadow-xs transition-all duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20 hover:border-border/80"
+      className={cn(
+        "w-full rounded-2xl border border-border bg-card p-3 sm:p-4 shadow-xs transition-all duration-200",
+        "hover:border-border/80 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20",
+        className,
+      )}
     >
-      <div className="relative">
+      <div className="flex flex-col">
         <textarea
           ref={textareaRef}
           value={prompt}
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
-          placeholder="Describe the website you want to build..."
-          rows={3}
+          placeholder={placeholder}
+          rows={2}
           disabled={isSubmitting}
-          className="w-full resize-none border-0 bg-transparent px-4 pt-4 pb-2 sm:px-5 sm:pt-5 sm:pb-3 text-sm sm:text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus-visible:ring-0 leading-relaxed min-h-[96px] sm:min-h-[120px] disabled:cursor-not-allowed disabled:opacity-60"
-          aria-label="Prompt to build website"
+          className="w-full resize-none border-0 bg-transparent px-1 pt-1 pb-2 text-sm sm:text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus-visible:ring-0 leading-relaxed min-h-[72px] sm:min-h-[80px] disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label={placeholder}
         />
 
-        {/* Bottom Action Bar */}
-        <div className="flex items-center justify-between border-t border-border/40 px-3 py-2.5 sm:px-4 sm:py-3 bg-muted/20 rounded-b-xl">
-          <span className="text-[11px] font-mono text-muted-foreground/70 hidden sm:inline-flex items-center gap-1.5 select-none">
-            <kbd className="rounded border border-border/80 bg-background/80 px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
-              Enter
-            </kbd>
-            to send
-            <span className="text-muted-foreground/40">•</span>
-            <kbd className="rounded border border-border/80 bg-background/80 px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
-              Shift + Enter
-            </kbd>
-            for newline
-          </span>
-
-          <div className="flex items-center gap-2 ml-auto">
+        {/* Minimal Bottom Control Bar */}
+        <div className="flex items-center justify-between pt-1">
+          <div className="ml-auto flex items-center">
             <Button
               type="submit"
               size="icon-sm"

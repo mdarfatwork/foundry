@@ -133,6 +133,107 @@ export async function getUserProjectsAction(): Promise<
 }
 
 /**
+ * Retrieves a single project by ID, strictly enforcing user ownership.
+ * Returns NOT_FOUND if the project does not exist or belongs to another user.
+ */
+export async function getProjectByIdAction(
+  projectId: string,
+): Promise<ActionResponse<ProjectRecord>> {
+  let user: AuthUser;
+  try {
+    user = await requireUser();
+  } catch {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      error: "You must be signed in to view this project.",
+    };
+  }
+
+  const trimmedId = projectId?.trim();
+  if (!trimmedId) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Valid project ID is required.",
+    };
+  }
+
+  if (process.env.DATABASE_URL) {
+    try {
+      const [record] = await db
+        .select()
+        .from(project)
+        .where(and(eq(project.id, trimmedId), eq(project.ownerId, user.id)))
+        .limit(1);
+
+      if (!record) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          error: "Project not found or you lack permission to view it.",
+        };
+      }
+
+      return {
+        success: true,
+        data: record,
+      };
+    } catch (err) {
+      console.error("[Foundry Actions] Database error querying project:", err);
+      return {
+        success: false,
+        code: "DATABASE_ERROR",
+        error: "Unable to retrieve project from database.",
+      };
+    }
+  }
+
+  return {
+    success: false,
+    code: "NOT_FOUND",
+    error: "Project not found or database unconfigured.",
+  };
+}
+
+/**
+ * Direct server-side data access helper for Server Components.
+ * Strictly verifies that the requested project belongs to the given user ID.
+ */
+export async function getProjectByIdForUser(
+  projectId: string,
+  userId: string,
+): Promise<ProjectRecord | null> {
+  const trimmedId = projectId?.trim();
+  const trimmedUserId = userId?.trim();
+  if (!trimmedId || !trimmedUserId) {
+    return null;
+  }
+
+  if (process.env.DATABASE_URL) {
+    try {
+      const [record] = await db
+        .select()
+        .from(project)
+        .where(
+          and(eq(project.id, trimmedId), eq(project.ownerId, trimmedUserId)),
+        )
+        .limit(1);
+
+      return record ?? null;
+    } catch (err) {
+      console.error(
+        "[Foundry Actions] Database error querying project for user:",
+        err,
+      );
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Deletes a project with strict ownership verification.
  * Prevents unauthorized users from deleting resources they do not own.
  */

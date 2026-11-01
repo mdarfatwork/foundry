@@ -161,6 +161,7 @@ Foundry's shadcn/ui installation is built on top of **`@base-ui/react`** (`style
   - Sizes: `xs` (24px), `sm` (28px), `default` (32px), `lg` (36px), `icon-xs` (24x24), `icon-sm` (28x28).
 - **Inputs & Textareas:**
   - Styled with `bg-transparent`, subtle border, and high-visibility focus ring (`focus-visible:ring-2 focus-visible:ring-ring/20`).
+  - **Form Fields & Label Spacing:** Form field groups must always maintain a clean vertical flex layout (`flex flex-col gap-2`) with an explicit `gap-2` (`0.5rem` / 8px) between the `<label>` and the `<Input>`. Labels must use `text-xs font-medium text-foreground cursor-pointer` with explicit `htmlFor` semantic binding. Never allow labels and inputs to collapse into zero gap.
 - **Cards (`components/ui/card.tsx`):**
   - Used for isolated UI modules and preview surfaces with `bg-card` and `border-border`.
 - **Badges (`components/ui/badge.tsx`):**
@@ -173,6 +174,7 @@ Foundry's shadcn/ui installation is built on top of **`@base-ui/react`** (`style
   - On desktop (`>= 768px`), renders a centered modal dialog (`Dialog`).
   - On mobile (`< 768px`), automatically adapts into a bottom-sheet drawer (`Drawer`).
   - Contains `Credenza`, `CredenzaTrigger`, `CredenzaContent`, `CredenzaHeader`, `CredenzaTitle`, `CredenzaDescription`, `CredenzaBody`, `CredenzaFooter`, `CredenzaClose`, and `useCredenza()`.
+  - **Usage Mandate:** Interactive creation, configuration, and management flows (such as New Project creation) use `Credenza` rather than standalone `Dialog` to ensure responsive parity across desktop and mobile viewports.
   - Intentionally exports only `Credenza*` primitives without polluting the namespace with `Dialog*` aliases.
 
 ---

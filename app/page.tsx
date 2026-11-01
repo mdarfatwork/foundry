@@ -96,7 +96,7 @@ export default function FoundryLandingPage({
     <div className="flex min-h-screen flex-col bg-background text-foreground selection:bg-foreground selection:text-background">
       {/* Minimal Top Navigation */}
       <header className="sticky top-0 z-40 w-full border-b border-border/40 bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-4 sm:px-6">
+        <div className="mx-auto flex h-14 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
           {/* Brand Logo & Wordmark */}
           <Link
             href="/"
@@ -124,13 +124,13 @@ export default function FoundryLandingPage({
 
       {/* Main Centered Hero Section & Prompt Composer */}
       <main className="flex flex-1 flex-col items-center justify-center px-4 sm:px-6 py-16 sm:py-24 md:py-28">
-        <div className="w-full max-w-2xl sm:max-w-3xl flex flex-col items-center text-center">
+        <div className="w-full max-w-2xl flex flex-col items-center text-center">
           {/* Confident Headline & Concise Supporting Text */}
           <div className="space-y-3 sm:space-y-4 mb-8 sm:mb-10">
             <h1 className="text-4xl sm:text-5xl md:text-6xl font-semibold tracking-tight text-foreground text-balance">
               Build anything with AI.
             </h1>
-            <p className="text-base sm:text-lg text-muted-foreground text-balance max-w-xl mx-auto leading-relaxed">
+            <p className="text-base sm:text-lg text-muted-foreground text-balance leading-relaxed">
               Describe the website or application you want to build, and Foundry
               turns your idea into a working product.
             </p>
