@@ -3,15 +3,32 @@
 import { eq, desc, and } from "drizzle-orm";
 import { requireUser, type AuthUser } from "@/lib/auth/session";
 import { db } from "@/lib/db";
-import { project, type Project } from "@/lib/db/schema";
+import {
+  project,
+  projectFile,
+  conversation,
+  message,
+  projectVersion,
+  type Project,
+  type ProjectFile,
+  type Message,
+  type ProjectVersion,
+} from "@/lib/db/schema";
+import {
+  getStarterTemplateFiles,
+  STARTER_TEMPLATE_ID,
+} from "@/lib/templates/starter-nextjs";
 
 /**
  * Server Actions for Foundry Projects.
  * Powered by Drizzle ORM with strict authorization and tenant isolation.
- * Adheres to AGENTS.md §7.1, §9, and Prompt §8.
+ * Adheres to AGENTS.md §7.1, §9, and Prompt §3, §4.
  */
 
 export type ProjectRecord = Project;
+export type ProjectFileRecord = ProjectFile;
+export type ProjectMessageRecord = Message;
+export type ProjectVersionRecord = ProjectVersion;
 
 export type ActionResponse<T> =
   | { readonly success: true; readonly data: T }
@@ -19,10 +36,13 @@ export type ActionResponse<T> =
 
 /**
  * Creates a new project owned exclusively by the authenticated user.
+ * Atomically initializes the project record, persistent starter files,
+ * an initial version snapshot, and a scoped conversation with a welcome message.
  */
 export async function createProjectAction(
   name: string,
   description?: string,
+  initialPrompt?: string,
 ): Promise<ActionResponse<ProjectRecord>> {
   let user: AuthUser;
   try {
@@ -45,22 +65,80 @@ export async function createProjectAction(
   }
 
   const projectId = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const starterFiles = getStarterTemplateFiles(trimmedName);
 
   if (process.env.DATABASE_URL) {
     try {
-      const [inserted] = await db
-        .insert(project)
-        .values({
-          id: projectId,
-          name: trimmedName,
-          description: description?.trim() || null,
-          ownerId: user.id,
-        })
-        .returning();
+      // Execute atomically in a database transaction
+      const insertedProject = await db.transaction(async (tx) => {
+        // 1. Insert Project Record
+        const [proj] = await tx
+          .insert(project)
+          .values({
+            id: projectId,
+            name: trimmedName,
+            description: description?.trim() || null,
+            prompt: initialPrompt?.trim() || null,
+            generationStatus: "idle",
+            template: STARTER_TEMPLATE_ID,
+            ownerId: user.id,
+          })
+          .returning();
+
+        // 2. Insert Persistent Starter Files
+        const fileValues = starterFiles.map((file, idx) => ({
+          id: `file_${projectId}_${idx}_${Math.random().toString(36).substring(2, 7)}`,
+          projectId,
+          path: file.path,
+          content: file.content,
+        }));
+
+        await tx.insert(projectFile).values(fileValues);
+
+        // 3. Create Initial Version Snapshot (v1)
+        const snapshotMap: Record<string, string> = {};
+        for (const f of starterFiles) {
+          snapshotMap[f.path] = f.content;
+        }
+
+        await tx.insert(projectVersion).values({
+          id: `ver_${projectId}_v1`,
+          projectId,
+          versionNumber: "v1",
+          prompt: "Initial Next.js + shadcn/ui template",
+          snapshot: JSON.stringify(snapshotMap),
+        });
+
+        // 4. Create Scoped Project Conversation
+        const convId = `conv_${projectId}_main`;
+        await tx.insert(conversation).values({
+          id: convId,
+          projectId,
+          title: "Main Conversation",
+        });
+
+        // 5. Create Initial Assistant Welcome Message
+        await tx.insert(message).values({
+          id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          projectId,
+          conversationId: convId,
+          role: "assistant",
+          content:
+            "Welcome to your Foundry workspace! I've set up your Next.js application with Tailwind CSS and Base UI components. Describe what you'd like to build, or request specific layouts, components, and visual themes.",
+          details: JSON.stringify([
+            "Initialized Next.js 16 App Router foundation",
+            "Configured Tailwind CSS v4 semantic tokens",
+            "Added Base UI button, card, and badge components",
+            "Ready to generate custom pages and components",
+          ]),
+        });
+
+        return proj;
+      });
 
       return {
         success: true,
-        data: inserted,
+        data: insertedProject,
       };
     } catch (err) {
       console.error("[Foundry Actions] Database error creating project:", err);
@@ -72,13 +150,16 @@ export async function createProjectAction(
     }
   }
 
+  // Fallback in environments without configured database (e.g. mock unit tests)
   return {
     success: true,
     data: {
       id: projectId,
       name: trimmedName,
       description: description?.trim() || null,
-      prompt: null,
+      prompt: initialPrompt?.trim() || null,
+      generationStatus: "idle",
+      template: STARTER_TEMPLATE_ID,
       ownerId: user.id,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -234,8 +315,171 @@ export async function getProjectByIdForUser(
 }
 
 /**
+ * Retrieves all persistent source files for a given project, strictly verifying ownership.
+ */
+export async function getProjectFilesAction(
+  projectId: string,
+): Promise<ActionResponse<readonly ProjectFileRecord[]>> {
+  let user: AuthUser;
+  try {
+    user = await requireUser();
+  } catch {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      error: "You must be signed in to view project files.",
+    };
+  }
+
+  const trimmedId = projectId?.trim();
+  if (!trimmedId) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Valid project ID is required.",
+    };
+  }
+
+  if (process.env.DATABASE_URL) {
+    try {
+      // 1. Verify Project Ownership
+      const proj = await getProjectByIdForUser(trimmedId, user.id);
+      if (!proj) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          error: "Project not found or you lack permission to view its files.",
+        };
+      }
+
+      // 2. Fetch Files
+      const files = await db
+        .select()
+        .from(projectFile)
+        .where(eq(projectFile.projectId, trimmedId))
+        .orderBy(projectFile.path);
+
+      // 3. Self-healing path normalization (cleans up any legacy misplaced paths)
+      const normalizedFiles: ProjectFileRecord[] = [];
+      for (const f of files) {
+        let normalizedPath = f.path.replace(/\\/g, "/").trim();
+        while (normalizedPath.startsWith("/"))
+          normalizedPath = normalizedPath.slice(1);
+        if (normalizedPath.startsWith("config/lib/")) {
+          normalizedPath = normalizedPath.replace(/^config\/lib\//, "lib/");
+        } else if (normalizedPath.startsWith("config/")) {
+          normalizedPath = normalizedPath.replace(/^config\//, "");
+        }
+
+        if (normalizedPath !== f.path) {
+          await db
+            .update(projectFile)
+            .set({ path: normalizedPath, updatedAt: new Date() })
+            .where(eq(projectFile.id, f.id));
+          normalizedFiles.push({ ...f, path: normalizedPath });
+        } else {
+          normalizedFiles.push(f);
+        }
+      }
+
+      return {
+        success: true,
+        data: normalizedFiles,
+      };
+    } catch (err) {
+      console.error("[Foundry Actions] Database error querying files:", err);
+      return {
+        success: false,
+        code: "DATABASE_ERROR",
+        error: "Unable to retrieve project files from database.",
+      };
+    }
+  }
+
+  // Fallback: return starter files in memory
+  const starter = getStarterTemplateFiles("Demo App").map((f, idx) => ({
+    id: `file_${trimmedId}_${idx}`,
+    projectId: trimmedId,
+    path: f.path,
+    content: f.content,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }));
+
+  return {
+    success: true,
+    data: starter,
+  };
+}
+
+/**
+ * Retrieves persistent chat messages for a given project, strictly verifying ownership.
+ */
+export async function getProjectMessagesAction(
+  projectId: string,
+): Promise<ActionResponse<readonly ProjectMessageRecord[]>> {
+  let user: AuthUser;
+  try {
+    user = await requireUser();
+  } catch {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      error: "You must be signed in to view project messages.",
+    };
+  }
+
+  const trimmedId = projectId?.trim();
+  if (!trimmedId) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Valid project ID is required.",
+    };
+  }
+
+  if (process.env.DATABASE_URL) {
+    try {
+      // 1. Verify Project Ownership
+      const proj = await getProjectByIdForUser(trimmedId, user.id);
+      if (!proj) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          error: "Project not found or you lack permission to view messages.",
+        };
+      }
+
+      // 2. Fetch Messages ordered chronologically
+      const messages = await db
+        .select()
+        .from(message)
+        .where(eq(message.projectId, trimmedId))
+        .orderBy(message.createdAt);
+
+      return {
+        success: true,
+        data: messages,
+      };
+    } catch (err) {
+      console.error("[Foundry Actions] Database error querying messages:", err);
+      return {
+        success: false,
+        code: "DATABASE_ERROR",
+        error: "Unable to retrieve project messages.",
+      };
+    }
+  }
+
+  return {
+    success: true,
+    data: [],
+  };
+}
+
+/**
  * Deletes a project with strict ownership verification.
- * Prevents unauthorized users from deleting resources they do not own.
+ * Cascades to files, conversations, messages, jobs, and versions via foreign keys.
  */
 export async function deleteProjectAction(
   projectId: string,

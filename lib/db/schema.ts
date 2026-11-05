@@ -117,6 +117,8 @@ export const project = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     prompt: text("prompt"),
+    generationStatus: text("generation_status").notNull().default("idle"),
+    template: text("template").notNull().default("nextjs-shadcn-v1"),
     ownerId: text("owner_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -130,7 +132,117 @@ export const project = pgTable(
   (table) => [index("project_owner_id_idx").on(table.ownerId)],
 );
 
-// 6. Relational Mappings (Drizzle Relational Queries & Lateral Joins)
+// 6. Project Source Files Table (Persistent file storage)
+export const projectFile = pgTable(
+  "project_file",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("project_file_project_path_idx").on(
+      table.projectId,
+      table.path,
+    ),
+    index("project_file_project_id_idx").on(table.projectId),
+  ],
+);
+
+// 7. Conversations Table (Chat threads scoped to a project)
+export const conversation = pgTable(
+  "conversation",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    title: text("title"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("conversation_project_id_idx").on(table.projectId)],
+);
+
+// 8. Messages Table (Persistent chat history)
+export const message = pgTable(
+  "message",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id").references(() => conversation.id, {
+      onDelete: "cascade",
+    }),
+    role: text("role").notNull(), // "user" | "assistant" | "system"
+    content: text("content").notNull(),
+    details: text("details"), // JSON serialized string array of bullet points
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("message_project_id_idx").on(table.projectId),
+    index("message_conversation_id_idx").on(table.conversationId),
+  ],
+);
+
+// 9. Generation Jobs Table (Tracks generation lifecycle: pending, running, succeeded, failed)
+export const generationJob = pgTable(
+  "generation_job",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    prompt: text("prompt").notNull(),
+    status: text("status").notNull().default("pending"), // "pending" | "running" | "succeeded" | "failed"
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("generation_job_project_id_idx").on(table.projectId)],
+);
+
+// 10. Project Versions Table (Snapshots of successful generations)
+export const projectVersion = pgTable(
+  "project_version",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    versionNumber: text("version_number").notNull(),
+    prompt: text("prompt"),
+    snapshot: text("snapshot").notNull(), // JSON string representing Record<string, string>
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("project_version_project_id_idx").on(table.projectId)],
+);
+
+// 11. Relational Mappings (Drizzle Relational Queries)
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
@@ -151,10 +263,58 @@ export const accountRelations = relations(account, ({ one }) => ({
   }),
 }));
 
-export const projectRelations = relations(project, ({ one }) => ({
+export const projectRelations = relations(project, ({ one, many }) => ({
   owner: one(user, {
     fields: [project.ownerId],
     references: [user.id],
+  }),
+  files: many(projectFile),
+  conversations: many(conversation),
+  messages: many(message),
+  generationJobs: many(generationJob),
+  versions: many(projectVersion),
+}));
+
+export const projectFileRelations = relations(projectFile, ({ one }) => ({
+  project: one(project, {
+    fields: [projectFile.projectId],
+    references: [project.id],
+  }),
+}));
+
+export const conversationRelations = relations(
+  conversation,
+  ({ one, many }) => ({
+    project: one(project, {
+      fields: [conversation.projectId],
+      references: [project.id],
+    }),
+    messages: many(message),
+  }),
+);
+
+export const messageRelations = relations(message, ({ one }) => ({
+  project: one(project, {
+    fields: [message.projectId],
+    references: [project.id],
+  }),
+  conversation: one(conversation, {
+    fields: [message.conversationId],
+    references: [conversation.id],
+  }),
+}));
+
+export const generationJobRelations = relations(generationJob, ({ one }) => ({
+  project: one(project, {
+    fields: [generationJob.projectId],
+    references: [project.id],
+  }),
+}));
+
+export const projectVersionRelations = relations(projectVersion, ({ one }) => ({
+  project: one(project, {
+    fields: [projectVersion.projectId],
+    references: [project.id],
   }),
 }));
 
@@ -169,3 +329,13 @@ export type Verification = typeof verification.$inferSelect;
 export type NewVerification = typeof verification.$inferInsert;
 export type Project = typeof project.$inferSelect;
 export type NewProject = typeof project.$inferInsert;
+export type ProjectFile = typeof projectFile.$inferSelect;
+export type NewProjectFile = typeof projectFile.$inferInsert;
+export type Conversation = typeof conversation.$inferSelect;
+export type NewConversation = typeof conversation.$inferInsert;
+export type Message = typeof message.$inferSelect;
+export type NewMessage = typeof message.$inferInsert;
+export type GenerationJob = typeof generationJob.$inferSelect;
+export type NewGenerationJob = typeof generationJob.$inferInsert;
+export type ProjectVersion = typeof projectVersion.$inferSelect;
+export type NewProjectVersion = typeof projectVersion.$inferInsert;

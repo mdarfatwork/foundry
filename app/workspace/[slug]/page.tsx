@@ -1,7 +1,12 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { requireUserOrRedirect } from "@/lib/auth/session";
-import { getProjectByIdForUser } from "@/app/actions/project";
+import {
+  getProjectByIdForUser,
+  getProjectFilesAction,
+  getProjectMessagesAction,
+} from "@/app/actions/project";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 
 type ProjectPageProps = Readonly<{
@@ -39,7 +44,28 @@ async function ProjectPageContent({ params }: ProjectPageProps) {
   const user = await requireUserOrRedirect(`/workspace/${slug}`);
   const project = await getProjectByIdForUser(slug, user.id);
 
-  return <WorkspaceShell project={project} user={user} slug={slug} />;
+  if (!project) {
+    notFound();
+  }
+
+  // Load persistent project files and chat messages
+  const [filesResult, messagesResult] = await Promise.all([
+    getProjectFilesAction(slug),
+    getProjectMessagesAction(slug),
+  ]);
+
+  const initialFiles = filesResult.success ? filesResult.data : [];
+  const initialMessages = messagesResult.success ? messagesResult.data : [];
+
+  return (
+    <WorkspaceShell
+      project={project}
+      user={user}
+      slug={slug}
+      initialFiles={initialFiles}
+      initialMessages={initialMessages}
+    />
+  );
 }
 
 function WorkspaceLoadingFallback() {

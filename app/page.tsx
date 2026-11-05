@@ -6,6 +6,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/auth/user-menu";
 import { PromptComposer } from "@/components/home/prompt-composer";
+import { HeroPromptComposer } from "@/components/home/hero-prompt-composer";
 import { getCurrentUser } from "@/lib/auth/session";
 import { cn } from "@/lib/utils";
 
@@ -84,6 +85,11 @@ function AuthNavFallback({ signInHref }: AuthNavProps) {
   );
 }
 
+async function HeroComposerContainer() {
+  const user = await getCurrentUser();
+  return <HeroPromptComposer isAuthenticated={!!user} />;
+}
+
 /**
  * Foundry Root Landing Page.
  * Implemented as a React Server Component (RSC) with Suspense streaming for dynamic auth state.
@@ -136,8 +142,10 @@ export default function FoundryLandingPage({
             </p>
           </div>
 
-          {/* Main Prompt Composer (Leaf Client Component) */}
-          <PromptComposer />
+          {/* Main Prompt Composer with Suspense for auth status */}
+          <Suspense fallback={<PromptComposer />}>
+            <HeroComposerContainer />
+          </Suspense>
 
           {/* Optional Subtle Supporting Text */}
           <p className="mt-3.5 text-xs text-muted-foreground select-none">

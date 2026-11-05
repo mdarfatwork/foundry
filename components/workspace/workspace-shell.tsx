@@ -1,28 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import { WorkspaceChatSidebar } from "@/components/workspace/workspace-chat-sidebar";
 import { WorkspaceCanvas } from "@/components/workspace/workspace-canvas";
-import type { ProjectRecord } from "@/app/actions/project";
+import type {
+  ProjectRecord,
+  ProjectFileRecord,
+  ProjectMessageRecord,
+} from "@/app/actions/project";
+import type { FileModification } from "@/lib/ai/types";
 import { cn } from "@/lib/utils";
 
 type WorkspaceShellUser = {
-  id: string;
-  name: string;
-  email: string;
-  image?: string | null;
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+  readonly image?: string | null;
 };
 
 type WorkspaceShellProps = Readonly<{
   project: ProjectRecord | null;
   user: WorkspaceShellUser | null;
   slug: string;
+  initialFiles?: readonly ProjectFileRecord[];
+  initialMessages?: readonly ProjectMessageRecord[];
 }>;
 
 function formatSlugToTitle(slug: string): string {
   if (!slug) return "Untitled Project";
-  // Clean synthetic database IDs
   if (slug.startsWith("proj_")) {
     return "Untitled Project";
   }
@@ -34,17 +40,59 @@ function formatSlugToTitle(slug: string): string {
 }
 
 /**
- * Client Workspace Shell coordinating mobile view switching and canvas viewport emulation.
+ * Client Workspace Shell coordinating mobile view switching, file updates, and canvas state.
  * Spans full viewport height and width with zero max-w-* constraints.
  * Adheres strictly to AGENTS.md §1, §5.1, §5.3, §5.4 and DESIGN.md.
  */
-export function WorkspaceShell({ project, user, slug }: WorkspaceShellProps) {
+export function WorkspaceShell({
+  project,
+  user,
+  slug,
+  initialFiles = [],
+  initialMessages = [],
+}: WorkspaceShellProps) {
   const [activeMobileTab, setActiveMobileTab] = useState<"chat" | "preview">(
     "chat",
   );
   const [viewportMode, setViewportMode] = useState<
     "desktop" | "tablet" | "mobile"
   >("desktop");
+  const [files, setFiles] =
+    useState<readonly ProjectFileRecord[]>(initialFiles);
+  const [isGenerating, setIsGenerating] = useState(
+    project?.generationStatus === "generating",
+  );
+
+  const handleFilesUpdated = useCallback(
+    (updatedFiles: readonly FileModification[]) => {
+      setFiles((prev) => {
+        const fileMap = new Map(prev.map((f) => [f.path, f]));
+        for (const uf of updatedFiles) {
+          const existing = fileMap.get(uf.path);
+          if (existing) {
+            fileMap.set(uf.path, {
+              ...existing,
+              content: uf.content,
+              updatedAt: new Date(),
+            });
+          } else {
+            fileMap.set(uf.path, {
+              id: `file_${slug}_${Math.random().toString(36).substring(2, 7)}`,
+              projectId: slug,
+              path: uf.path,
+              content: uf.content,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+          }
+        }
+        return Array.from(fileMap.values()).sort((a, b) =>
+          a.path.localeCompare(b.path),
+        );
+      });
+    },
+    [slug],
+  );
 
   const projectName = project?.name || formatSlugToTitle(slug);
 
@@ -62,12 +110,20 @@ export function WorkspaceShell({ project, user, slug }: WorkspaceShellProps) {
       <main className="flex flex-1 min-h-0 w-full overflow-hidden">
         {/* Left Chat Sidebar: Always visible on desktop; conditionally rendered on mobile */}
         <WorkspaceChatSidebar
+          projectId={project?.id ?? slug}
+          initialMessages={initialMessages}
+          isGenerating={isGenerating}
+          onGeneratingChange={setIsGenerating}
+          onFilesUpdated={handleFilesUpdated}
           className={cn(activeMobileTab === "chat" ? "flex" : "hidden md:flex")}
         />
 
         {/* Right Canvas: Always visible on desktop; conditionally rendered on mobile */}
         <WorkspaceCanvas
+          project={project}
+          files={files}
           slug={slug}
+          isGenerating={isGenerating}
           viewportMode={viewportMode}
           onViewportModeChange={setViewportMode}
           className={cn(

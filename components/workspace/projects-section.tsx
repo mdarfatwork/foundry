@@ -40,7 +40,7 @@ export function ProjectsSection({ initialProjects }: ProjectsSectionProps) {
 
   const handleProjectCreated = (newProject: ProjectRecord) => {
     setProjects((prev) => [newProject, ...prev]);
-    router.refresh();
+    router.push(`/workspace/${newProject.id}`);
   };
 
   return (
