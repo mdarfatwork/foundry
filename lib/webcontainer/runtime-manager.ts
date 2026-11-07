@@ -237,6 +237,10 @@ class WebContainerRuntimeManager {
       return livingInstance;
     }
 
+    if (globalForWebContainer.__foundry_boot_promise__) {
+      return globalForWebContainer.__foundry_boot_promise__;
+    }
+
     if (this.bootPromise) {
       return this.bootPromise;
     }
@@ -255,7 +259,7 @@ class WebContainerRuntimeManager {
       "[Foundry WebContainer] Initializing in-browser Node.js runtime...",
     );
 
-    this.bootPromise = (async () => {
+    const bootP = (async () => {
       try {
         const apiKey = process.env.NEXT_PUBLIC_WEBCONTAINER_API_KEY?.trim();
         const hostname =
@@ -293,6 +297,7 @@ class WebContainerRuntimeManager {
         return container;
       } catch (err) {
         this.bootPromise = null;
+        globalForWebContainer.__foundry_boot_promise__ = null;
         const msg =
           err instanceof Error
             ? err.message
@@ -303,16 +308,22 @@ class WebContainerRuntimeManager {
           WebContainer as unknown as { _instance?: WebContainer | null }
         )._instance;
         if (
-          existingAfterError &&
+          existingAfterError ||
           msg.includes("Only a single WebContainer instance can be booted")
         ) {
-          this.appendLog(
-            "[Foundry WebContainer] Reconnected to living in-browser WebContainer runtime.",
-          );
-          this.instance = existingAfterError;
-          this.attachListeners(existingAfterError);
-          this.updateState({ status: "idle", error: null });
-          return existingAfterError;
+          const recovered =
+            existingAfterError ??
+            (WebContainer as unknown as { _instance?: WebContainer | null })
+              ._instance;
+          if (recovered) {
+            this.appendLog(
+              "[Foundry WebContainer] Reconnected to living in-browser WebContainer runtime.",
+            );
+            this.instance = recovered;
+            this.attachListeners(recovered);
+            this.updateState({ status: "idle", error: null });
+            return recovered;
+          }
         }
 
         if (msg.toLowerCase().includes("referrer")) {
@@ -328,10 +339,14 @@ class WebContainerRuntimeManager {
         this.appendLog(`[Foundry WebContainer Boot Failure] ${msg}`);
         this.updateState({ status: "error", error: msg });
         throw err;
+      } finally {
+        globalForWebContainer.__foundry_boot_promise__ = null;
       }
     })();
 
-    return this.bootPromise;
+    this.bootPromise = bootP;
+    globalForWebContainer.__foundry_boot_promise__ = bootP;
+    return bootP;
   }
 
   /**
@@ -747,6 +762,7 @@ class WebContainerRuntimeManager {
 
 const globalForWebContainer = globalThis as unknown as {
   __foundry_runtime_manager__?: WebContainerRuntimeManager;
+  __foundry_boot_promise__?: Promise<WebContainer> | null;
 };
 
 // Global browser singleton (persisted on globalThis to prevent instance destruction across HMR)

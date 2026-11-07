@@ -84,8 +84,8 @@ export function WorkspaceCanvas({
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const terminalLogsEndRef = useRef<HTMLDivElement>(null);
-  const hasInitializedRef = useRef(false);
-  const prevSlugRef = useRef<string>(slug);
+  const activeSlugRef = useRef<string | null>(null);
+  const previousFilesKeyRef = useRef<string>("");
 
   // WebContainer browser runtime controller
   const {
@@ -128,35 +128,28 @@ export function WorkspaceCanvas({
     }
   }, [logs, showTerminal]);
 
-  // Initialize WebContainer runtime once files are ready or when project changes
+  // Coordinate WebContainer workspace startup and incremental file syncing
   useEffect(() => {
-    if (
-      (!hasInitializedRef.current || prevSlugRef.current !== slug) &&
-      normalizedFiles.length > 0 &&
-      isSupported
-    ) {
-      hasInitializedRef.current = true;
-      prevSlugRef.current = slug;
-      startWorkspace(normalizedFiles);
-    }
-  }, [slug, normalizedFiles, startWorkspace, isSupported]);
+    if (!isSupported || normalizedFiles.length === 0) return;
 
-  // Sync files incrementally when AI updates them without restarting runtime
-  const previousFilesRef = useRef<string>("");
-  useEffect(() => {
     const currentFilesKey = normalizedFiles
       .map((f) => `${f.path}:${f.content.length}`)
       .join("|");
 
-    if (
-      hasInitializedRef.current &&
-      previousFilesRef.current &&
-      previousFilesRef.current !== currentFilesKey
-    ) {
+    // Case 1: First mount or project changed -> start workspace
+    if (activeSlugRef.current !== slug) {
+      activeSlugRef.current = slug;
+      previousFilesKeyRef.current = currentFilesKey;
+      startWorkspace(normalizedFiles);
+      return;
+    }
+
+    // Case 2: Subsequent file updates in the same project -> sync files incrementally (HMR)
+    if (previousFilesKeyRef.current !== currentFilesKey) {
+      previousFilesKeyRef.current = currentFilesKey;
       syncFiles(normalizedFiles);
     }
-    previousFilesRef.current = currentFilesKey;
-  }, [normalizedFiles, syncFiles]);
+  }, [slug, normalizedFiles, startWorkspace, syncFiles, isSupported]);
 
   const handleRefreshIframe = useCallback(() => {
     setIsRefreshingIframe(true);
