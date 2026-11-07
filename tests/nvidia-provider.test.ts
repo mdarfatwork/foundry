@@ -226,6 +226,22 @@ Enjoy building with Foundry!`;
       expect(res.needsClarification).toBe(false);
       expect(fetchSpy).not.toHaveBeenCalled();
     });
+
+    it("skips clarification directly for user's multi-section luxury real estate prompt", async () => {
+      process.env.NVIDIA_API_KEY = "test-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const userRealEstatePrompt =
+        "Create a modern, premium, and visually stunning real estate company landing page with a luxury aesthetic. " +
+        "Include a full-width hero section with a beautiful property background, bold headline, property search bar, " +
+        "featured property listings, services, company introduction, client testimonials, and a contact section. " +
+        "Use elegant typography, a clean layout, subtle animations, and a sophisticated color palette of white, black, and gold. " +
+        "Make it fully responsive, user-friendly, and conversion-focused.";
+
+      const res = await assessClarificationWithNvidia(userRealEstatePrompt);
+      expect(res.needsClarification).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe("generateWebsiteWithNvidia Provider Execution", () => {
@@ -348,6 +364,55 @@ Enjoy building with Foundry!`;
         expect(result.output.files).toHaveLength(1);
         expect(result.output.files[0].path).toBe("app/page.tsx");
         expect(result.usage?.completionTokens).toBe(300);
+      }
+    });
+
+    it("successfully streams SSE chunks and accumulates complete output", async () => {
+      process.env.NVIDIA_API_KEY = "test-nvidia-key";
+
+      const validJson = JSON.stringify({
+        summary: "Created streaming landing page.",
+        details: ["Streaming support"],
+        files: [
+          {
+            path: "app/page.tsx",
+            content:
+              "export default function Page() { return <div>Streamed</div>; }",
+          },
+        ],
+      });
+
+      // Split into multiple SSE chunks
+      const chunk1 = `data: {"choices":[{"delta":{"role":"assistant","content":${JSON.stringify(validJson.slice(0, 30))}}}]}\n\n`;
+      const chunk2 = `data: {"choices":[{"delta":{"content":${JSON.stringify(validJson.slice(30))}},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":120}}\n\n`;
+      const chunk3 = "data: [DONE]\n\n";
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(chunk1));
+          controller.enqueue(new TextEncoder().encode(chunk2));
+          controller.enqueue(new TextEncoder().encode(chunk3));
+          controller.close();
+        },
+      });
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        status: 200,
+        ok: true,
+        body: stream,
+      } as unknown as Response);
+
+      const result = await generateWebsiteWithNvidia({
+        prompt: "Stream a landing page",
+        existingFiles: [],
+      });
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.output.summary).toBe("Created streaming landing page.");
+        expect(result.output.files[0].path).toBe("app/page.tsx");
+        expect(result.output.files[0].content).toContain("Streamed");
+        expect(result.usage?.completionTokens).toBe(120);
       }
     });
   });

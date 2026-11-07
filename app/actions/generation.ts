@@ -11,15 +11,16 @@ import {
   projectVersion,
 } from "@/lib/db/schema";
 import { getProjectByIdForUser, type ActionResponse } from "./project";
-import {
-  generateWebsiteWithNvidia,
-  assessClarificationWithNvidia,
-} from "@/lib/ai/nvidia";
+import { generateWebsite, assessClarification } from "@/lib/ai/unified";
+import { inspectReferenceWebsite } from "@/lib/ai/references";
 import { validateGeneratedFiles } from "@/lib/ai/validator";
 import type {
   FileModification,
   ClarificationQuestion,
   ClarificationPayload,
+  DesignReference,
+  UrlReference,
+  AIProvider,
 } from "@/lib/ai/types";
 
 /**
@@ -46,8 +47,11 @@ export type GenerationActionResult =
 const MIN_PROMPT_LENGTH = 3;
 const MAX_PROMPT_LENGTH = 3000;
 
-type GenerationOptions = {
+export type GenerationOptions = {
   readonly skipClarification?: boolean;
+  readonly references?: readonly DesignReference[];
+  readonly provider?: AIProvider;
+  readonly model?: string;
 };
 
 /**
@@ -58,6 +62,7 @@ async function executeGeneration(
   user: AuthUser,
   promptToRun: string,
   recordUserMessage = true,
+  options?: GenerationOptions,
 ): Promise<ActionResponse<GenerationActionResult>> {
   const trimmedId = projectId.trim();
   const trimmedPrompt = promptToRun.trim();
@@ -143,10 +148,13 @@ async function executeGeneration(
     }
   }
 
-  // 5. Invoke NVIDIA Inference API with safe timeout
-  const aiResult = await generateWebsiteWithNvidia({
+  // 5. Invoke Multi-Provider Inference API with safe timeout
+  const aiResult = await generateWebsite({
     prompt: trimmedPrompt,
     existingFiles,
+    references: options?.references,
+    provider: options?.provider,
+    model: options?.model,
   });
 
   // 6. Handle AI Provider Failure (Preserves Existing Project Files)
@@ -175,7 +183,7 @@ async function executeGeneration(
           id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
           projectId: trimmedId,
           role: "assistant",
-          content: `I couldn't complete that generation request: ${aiResult.error}. Your previous project files were preserved.`,
+          content: `I couldn't complete that generation request: ${aiResult.error.replace(/\.+$/, "")}. Your previous project files were preserved.`,
         });
       } catch (dbErr) {
         console.error(
@@ -410,7 +418,11 @@ export async function generateProjectCodeAction(
 
   // 3. Check if Clarification is requested and necessary
   if (!options?.skipClarification) {
-    const clarification = await assessClarificationWithNvidia(trimmedPrompt);
+    const clarification = await assessClarification(
+      trimmedPrompt,
+      options?.references,
+      options?.provider,
+    );
 
     if (
       clarification.needsClarification &&
@@ -424,6 +436,7 @@ export async function generateProjectCodeAction(
         questions: clarification.questions,
         originalPrompt: trimmedPrompt,
         answered: false,
+        references: options?.references,
       };
 
       if (process.env.DATABASE_URL) {
@@ -466,7 +479,7 @@ export async function generateProjectCodeAction(
   }
 
   // 4. Generate directly if clarification not needed or skipped
-  return executeGeneration(trimmedId, user, trimmedPrompt, true);
+  return executeGeneration(trimmedId, user, trimmedPrompt, true, options);
 }
 
 /**
@@ -477,6 +490,9 @@ export async function submitClarificationAnswersAction(
   messageId: string,
   originalPrompt: string,
   answers: Record<string, readonly string[]>,
+  references?: readonly DesignReference[],
+  provider?: AIProvider,
+  model?: string,
 ): Promise<ActionResponse<GenerationActionResult>> {
   let user: AuthUser;
   try {
@@ -522,6 +538,8 @@ export async function submitClarificationAnswersAction(
       ? formattedChoices.join("\n")
       : "Selected default Foundry preferences.";
 
+  let resolvedReferences = references;
+
   // 2. Mark the clarification message in DB as answered
   if (process.env.DATABASE_URL && messageId) {
     try {
@@ -536,6 +554,9 @@ export async function submitClarificationAnswersAction(
           const parsed = JSON.parse(existingMsg.details);
           parsed.answered = true;
           parsed.answers = answers;
+          if (!resolvedReferences && parsed.references) {
+            resolvedReferences = parsed.references;
+          }
           await db
             .update(message)
             .set({ details: JSON.stringify(parsed) })
@@ -564,5 +585,41 @@ export async function submitClarificationAnswersAction(
   const finalBrief = `${trimmedPrompt}\n\nSelected Design & Section Preferences:\n${answerSummaryText}`;
 
   // 4. Execute generation without recording another duplicate user prompt
-  return executeGeneration(trimmedId, user, finalBrief, false);
+  return executeGeneration(trimmedId, user, finalBrief, false, {
+    references: resolvedReferences,
+    provider,
+    model,
+  });
+}
+
+/**
+ * Inspects a user-supplied inspiration website URL with SSRF guards.
+ */
+export async function inspectReferenceUrlAction(
+  url: string,
+): Promise<ActionResponse<UrlReference>> {
+  try {
+    await requireUser();
+  } catch {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      error: "You must be signed in to inspect reference URLs.",
+    };
+  }
+
+  const trimmedUrl = url?.trim();
+  if (!trimmedUrl) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "URL is required.",
+    };
+  }
+
+  const result = await inspectReferenceWebsite(trimmedUrl);
+  return {
+    success: true,
+    data: result,
+  };
 }

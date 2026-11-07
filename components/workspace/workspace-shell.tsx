@@ -62,6 +62,14 @@ export function WorkspaceShell({
   const [isGenerating, setIsGenerating] = useState(
     project?.generationStatus === "generating",
   );
+  const [fixErrorPrompt, setFixErrorPrompt] = useState<string | null>(null);
+
+  const handleRequestFixError = useCallback((errorDescription: string) => {
+    setFixErrorPrompt(
+      `Please fix this preview build/runtime error in my Next.js landing page:\n\n${errorDescription}`,
+    );
+    setActiveMobileTab("chat");
+  }, []);
 
   const handleFilesUpdated = useCallback(
     (updatedFiles: readonly FileModification[]) => {
@@ -115,6 +123,8 @@ export function WorkspaceShell({
           isGenerating={isGenerating}
           onGeneratingChange={setIsGenerating}
           onFilesUpdated={handleFilesUpdated}
+          externalPromptPrefill={fixErrorPrompt}
+          onClearExternalPrompt={() => setFixErrorPrompt(null)}
           className={cn(activeMobileTab === "chat" ? "flex" : "hidden md:flex")}
         />
 
@@ -126,6 +136,7 @@ export function WorkspaceShell({
           isGenerating={isGenerating}
           viewportMode={viewportMode}
           onViewportModeChange={setViewportMode}
+          onRequestFixError={handleRequestFixError}
           className={cn(
             activeMobileTab === "preview" ? "flex" : "hidden md:flex",
           )}

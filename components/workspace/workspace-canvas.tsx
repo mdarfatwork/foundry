@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import {
   Monitor,
   Tablet,
@@ -15,14 +15,18 @@ import {
   Check,
   Copy,
   Folder,
-  Layers,
-  LayoutGrid,
   Loader2,
   FileJson,
   Settings,
+  Terminal,
+  ChevronDown,
+  ChevronUp,
+  AlertCircle,
+  RefreshCw,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { useWebContainer } from "@/hooks/use-webcontainer";
 import type { ProjectRecord, ProjectFileRecord } from "@/app/actions/project";
 import { cn } from "@/lib/utils";
 
@@ -37,31 +41,8 @@ type WorkspaceCanvasProps = Readonly<{
   onViewportModeChange: (mode: ViewportMode) => void;
   className?: string;
   isGenerating?: boolean;
+  onRequestFixError?: (errorDescription: string) => void;
 }>;
-
-const STARTER_TEMPLATES = [
-  {
-    title: "SaaS Landing Page",
-    description:
-      "Hero with CTA, feature architecture, testimonials, and 3-tier pricing matrix.",
-    badge: "Full-Stack",
-    icon: LayoutGrid,
-  },
-  {
-    title: "Interactive Analytics Dashboard",
-    description:
-      "Real-time metrics, line charts, data tables, and collapsible sidebar navigation.",
-    badge: "Data",
-    icon: Layers,
-  },
-  {
-    title: "Design System Showcase",
-    description:
-      "Accessible Base UI primitives, responsive dialogs, tokens, and theme controls.",
-    badge: "UI Kit",
-    icon: Sparkles,
-  },
-] as const;
 
 function normalizeFilePath(rawPath: string): string {
   let p = rawPath.replace(/\\/g, "/").trim();
@@ -76,9 +57,10 @@ function normalizeFilePath(rawPath: string): string {
 
 /**
  * Main Workspace Canvas Surface.
- * Houses preview toolbar, dynamic viewport controls, hierarchical Next.js file tree explorer,
- * and responsive browser-frame application canvas.
- * Adheres strictly to AGENTS.md §1, §5.1, §5.3, §5.4 and DESIGN.md.
+ * Runs the generated Next.js application inside WebContainers in the browser.
+ * Provides live iframe preview, responsive viewports, Next.js code explorer,
+ * dependency status, dev server controls, and collapsible terminal logs.
+ * Adheres strictly to AGENTS.md §1, §5.1, §5.3, §5.4 and Prompt §3, §9, §10.
  */
 export function WorkspaceCanvas({
   project,
@@ -88,14 +70,39 @@ export function WorkspaceCanvas({
   onViewportModeChange,
   className,
   isGenerating = false,
+  onRequestFixError,
 }: WorkspaceCanvasProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [selectedFilePath, setSelectedFilePath] =
     useState<string>("app/page.tsx");
-  const [hasCopied, setHasCopied] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [hasCopiedCode, setHasCopiedCode] = useState(false);
+  const [hasCopiedLogs, setHasCopiedLogs] = useState(false);
+  const [isRefreshingIframe, setIsRefreshingIframe] = useState(false);
+  const [terminalExplicitState, setTerminalExplicitState] = useState<
+    boolean | null
+  >(null);
 
-  // Normalize files list to prevent any misplaced legacy paths
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const terminalLogsEndRef = useRef<HTMLDivElement>(null);
+  const hasInitializedRef = useRef(false);
+
+  // WebContainer browser runtime controller
+  const {
+    status,
+    previewUrl,
+    error: runtimeError,
+    logs,
+    isSupported,
+    startWorkspace,
+    restartServer,
+    syncFiles,
+    reinstallDependencies,
+  } = useWebContainer();
+
+  // Derive terminal visibility: explicit user toggle takes precedence; otherwise opens on error
+  const showTerminal = terminalExplicitState ?? status === "error";
+
+  // Normalize files list to guarantee valid POSIX relative paths
   const normalizedFiles = useMemo(() => {
     return files.map((f) => ({
       ...f,
@@ -113,17 +120,68 @@ export function WorkspaceCanvas({
     );
   }, [normalizedFiles, selectedFilePath]);
 
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    setTimeout(() => setIsRefreshing(false), 500);
-  };
+  // Auto-scroll terminal to bottom when new logs arrive
+  useEffect(() => {
+    if (showTerminal && terminalLogsEndRef.current) {
+      terminalLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, showTerminal]);
+
+  // Initialize WebContainer runtime once files are ready
+  useEffect(() => {
+    if (
+      !hasInitializedRef.current &&
+      normalizedFiles.length > 0 &&
+      isSupported
+    ) {
+      hasInitializedRef.current = true;
+      startWorkspace(normalizedFiles);
+    }
+  }, [normalizedFiles, startWorkspace, isSupported]);
+
+  // Sync files incrementally when AI updates them without restarting runtime
+  const previousFilesRef = useRef<string>("");
+  useEffect(() => {
+    const currentFilesKey = normalizedFiles
+      .map((f) => `${f.path}:${f.content.length}`)
+      .join("|");
+
+    if (
+      hasInitializedRef.current &&
+      previousFilesRef.current &&
+      previousFilesRef.current !== currentFilesKey
+    ) {
+      syncFiles(normalizedFiles);
+    }
+    previousFilesRef.current = currentFilesKey;
+  }, [normalizedFiles, syncFiles]);
+
+  const handleRefreshIframe = useCallback(() => {
+    setIsRefreshingIframe(true);
+    if (iframeRef.current && previewUrl) {
+      // Reload iframe without restarting container
+      iframeRef.current.src = previewUrl;
+    }
+    setTimeout(() => setIsRefreshingIframe(false), 600);
+  }, [previewUrl]);
 
   const handleCopyCode = async () => {
     if (!selectedFile) return;
     try {
       await navigator.clipboard.writeText(selectedFile.content);
-      setHasCopied(true);
-      setTimeout(() => setHasCopied(false), 2000);
+      setHasCopiedCode(true);
+      setTimeout(() => setHasCopiedCode(false), 2000);
+    } catch {
+      // Ignore clipboard error
+    }
+  };
+
+  const handleCopyLogs = async () => {
+    if (logs.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(logs.join("\n"));
+      setHasCopiedLogs(true);
+      setTimeout(() => setHasCopiedLogs(false), 2000);
     } catch {
       // Ignore clipboard error
     }
@@ -215,12 +273,53 @@ export function WorkspaceCanvas({
           <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-muted/50 border border-border/50 text-[11px] text-muted-foreground font-mono truncate">
             <Lock className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
             <span className="text-foreground">preview.foundry.dev</span>
-            <span className="text-muted-foreground/60 truncate">/{slug}</span>
+            <span
+              className="text-muted-foreground/60 truncate"
+              title={project?.name || slug}
+            >
+              /
+              {project?.name
+                ? project.name.toLowerCase().replace(/[^a-z0-9_-]/g, "-")
+                : slug}
+            </span>
           </div>
         </div>
 
-        {/* Right: Device Viewport Controls & Actions */}
+        {/* Right: Runtime Controls, Device Viewports, Terminal Toggle */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {/* Terminal / Build Output Toggle */}
+          <button
+            type="button"
+            onClick={() => setTerminalExplicitState(!showTerminal)}
+            className={cn(
+              "flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono transition-colors cursor-pointer border",
+              showTerminal
+                ? "bg-foreground text-background border-foreground font-medium"
+                : "bg-muted/60 text-muted-foreground border-border/60 hover:text-foreground hover:bg-muted",
+              status === "error" &&
+                !showTerminal &&
+                "border-destructive/60 text-destructive animate-pulse",
+            )}
+            title="Toggle WebContainer terminal logs"
+          >
+            <Terminal className="h-3 w-3" />
+            <span className="text-[11px] hidden sm:inline">Logs</span>
+            {logs.length > 0 && (
+              <span className="text-[9px] opacity-80">({logs.length})</span>
+            )}
+            {showTerminal ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronUp className="h-3 w-3" />
+            )}
+          </button>
+
+          <div
+            className="h-3.5 w-px bg-border/60 shrink-0 hidden sm:block"
+            aria-hidden="true"
+          />
+
+          {/* Viewport presets */}
           <div className="flex items-center rounded-md bg-muted p-0.5 text-xs border border-border/40">
             <button
               type="button"
@@ -269,381 +368,539 @@ export function WorkspaceCanvas({
             </button>
           </div>
 
+          {/* Refresh iframe button */}
           <Button
             type="button"
             variant="ghost"
             size="icon-xs"
-            onClick={handleRefresh}
-            className="text-muted-foreground hover:text-foreground cursor-pointer"
-            title="Refresh preview"
-            aria-label="Refresh preview"
+            onClick={handleRefreshIframe}
+            disabled={!previewUrl || status !== "ready"}
+            className="text-muted-foreground hover:text-foreground cursor-pointer disabled:opacity-30"
+            title="Refresh preview iframe"
+            aria-label="Refresh preview iframe"
           >
             <RotateCw
               className={cn(
                 "h-3.5 w-3.5 transition-transform",
-                isRefreshing && "animate-spin",
+                isRefreshingIframe && "animate-spin",
               )}
             />
           </Button>
 
+          {/* Restart dev server button */}
           <Button
             type="button"
             variant="ghost"
             size="icon-xs"
-            className="text-muted-foreground hover:text-foreground cursor-pointer hidden sm:inline-flex"
-            title="Open in new window"
-            aria-label="Open in new window"
+            onClick={() => restartServer()}
+            disabled={status === "booting" || status === "installing"}
+            className="text-muted-foreground hover:text-foreground cursor-pointer hidden sm:inline-flex disabled:opacity-30"
+            title="Restart development server"
+            aria-label="Restart development server"
           >
-            <ExternalLink className="h-3.5 w-3.5" />
+            <RefreshCw className="h-3.5 w-3.5" />
           </Button>
+
+          {/* Open in new tab if previewUrl exists */}
+          {previewUrl && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => window.open(previewUrl, "_blank")}
+              className="text-muted-foreground hover:text-foreground cursor-pointer hidden sm:inline-flex"
+              title="Open preview in new tab"
+              aria-label="Open in new window"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* 2. Canvas Body: Either Code View or Interactive Preview */}
-      {viewMode === "code" ? (
-        <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden border-t border-border bg-card">
-          {/* File Tree Explorer (Left sub-panel) */}
-          <div className="w-full md:w-64 border-r border-border bg-sidebar/10 p-3 overflow-y-auto shrink-0 select-none space-y-4">
-            {/* App Directory */}
-            {fileGroups.app.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-                  <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
-                  <span>app/</span>
-                </div>
-                <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
-                  {fileGroups.app.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
-                      className={cn(
-                        "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
-                        selectedFile?.path === file.path
-                          ? "bg-accent text-foreground font-medium shadow-2xs"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <FileCode className="h-3 w-3 shrink-0" />
-                      <span className="truncate">
-                        {file.path.replace("app/", "")}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Components Directory */}
-            {fileGroups.components.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-                  <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
-                  <span>components/</span>
-                </div>
-                <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
-                  {fileGroups.components.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
-                      className={cn(
-                        "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
-                        selectedFile?.path === file.path
-                          ? "bg-accent text-foreground font-medium shadow-2xs"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <FileCode className="h-3 w-3 shrink-0" />
-                      <span className="truncate">
-                        {file.path.replace("components/", "")}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Lib Directory */}
-            {fileGroups.lib.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-                  <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
-                  <span>lib/</span>
-                </div>
-                <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
-                  {fileGroups.lib.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
-                      className={cn(
-                        "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
-                        selectedFile?.path === file.path
-                          ? "bg-accent text-foreground font-medium shadow-2xs"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <FileCode className="h-3 w-3 shrink-0" />
-                      <span className="truncate">
-                        {file.path.replace("lib/", "")}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Public Directory (if present) */}
-            {fileGroups.public.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-                  <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
-                  <span>public/</span>
-                </div>
-                <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
-                  {fileGroups.public.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
-                      className={cn(
-                        "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
-                        selectedFile?.path === file.path
-                          ? "bg-accent text-foreground font-medium shadow-2xs"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <FileCode className="h-3 w-3 shrink-0" />
-                      <span className="truncate">
-                        {file.path.replace("public/", "")}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Root-Level Configuration Files */}
-            {fileGroups.rootConfig.length > 0 && (
-              <div className="space-y-1 pt-2 border-t border-border/40">
-                <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                  <Settings className="h-3 w-3 shrink-0" />
-                  <span>Root Config</span>
-                </div>
-                <div className="space-y-0.5">
-                  {fileGroups.rootConfig.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
-                      className={cn(
-                        "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
-                        selectedFile?.path === file.path
-                          ? "bg-accent text-foreground font-medium shadow-2xs"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <FileJson className="h-3 w-3 shrink-0 text-muted-foreground" />
-                      <span className="truncate font-mono text-[11px]">
-                        {file.path}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Code Viewer (Right sub-panel) */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-background">
-            {selectedFile ? (
-              <>
-                <div className="h-9 px-4 border-b border-border flex items-center justify-between shrink-0 bg-muted/20">
-                  <div className="flex items-center gap-2 font-mono text-xs text-foreground">
-                    <FileCode className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="font-semibold">{selectedFile.path}</span>
+      {/* 2. Main Body: Either Code Explorer or Live Browser Preview */}
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
+        {viewMode === "code" ? (
+          <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden border-t border-border bg-card">
+            {/* File Tree Explorer (Left sub-panel) */}
+            <div className="w-full md:w-64 border-r border-border bg-sidebar/10 p-3 overflow-y-auto shrink-0 select-none space-y-4">
+              {/* App Directory */}
+              {fileGroups.app.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
+                    <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span>app/</span>
                   </div>
-
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    onClick={handleCopyCode}
-                    className="gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    {hasCopied ? (
-                      <>
-                        <Check className="h-3.5 w-3.5 text-emerald-500" />
-                        <span className="text-emerald-500">Copied</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3.5 w-3.5" />
-                        <span>Copy</span>
-                      </>
-                    )}
-                  </Button>
+                  <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
+                    {fileGroups.app.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => setSelectedFilePath(file.path)}
+                        className={cn(
+                          "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
+                          selectedFile?.path === file.path
+                            ? "bg-accent text-foreground font-medium shadow-2xs"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                        )}
+                      >
+                        <FileCode className="h-3 w-3 shrink-0" />
+                        <span className="truncate">
+                          {file.path.replace("app/", "")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
+              )}
 
-                <div className="flex-1 min-h-0 overflow-auto p-4 font-mono text-xs select-text leading-relaxed bg-background/50">
-                  <pre className="text-foreground whitespace-pre">
-                    <code>{selectedFile.content}</code>
-                  </pre>
+              {/* Components Directory */}
+              {fileGroups.components.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
+                    <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span>components/</span>
+                  </div>
+                  <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
+                    {fileGroups.components.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => setSelectedFilePath(file.path)}
+                        className={cn(
+                          "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
+                          selectedFile?.path === file.path
+                            ? "bg-accent text-foreground font-medium shadow-2xs"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                        )}
+                      >
+                        <FileCode className="h-3 w-3 shrink-0" />
+                        <span className="truncate">
+                          {file.path.replace("components/", "")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
-                No file selected.
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        /* Preview Canvas */
-        <div className="flex-1 overflow-y-auto p-3 sm:p-5 min-h-0 flex items-center justify-center">
-          {/* Dynamic Responsive Browser Frame Container */}
-          <div
-            className={cn(
-              "h-full min-h-[460px] flex flex-col rounded-xl border border-border bg-card shadow-2xs overflow-hidden transition-all duration-300",
-              viewportMode === "desktop" && "w-full",
-              viewportMode === "tablet" && "w-[768px]",
-              viewportMode === "mobile" && "w-[375px]",
-            )}
-          >
-            {/* Browser Chrome Header */}
-            <div className="h-8 px-3 border-b border-border/60 bg-muted/30 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-border" />
-                <span className="h-2 w-2 rounded-full bg-border" />
-                <span className="h-2 w-2 rounded-full bg-border" />
-              </div>
+              )}
 
-              <div className="flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground">
-                <span>localhost:3000</span>
-              </div>
+              {/* Lib Directory */}
+              {fileGroups.lib.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
+                    <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span>lib/</span>
+                  </div>
+                  <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
+                    {fileGroups.lib.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => setSelectedFilePath(file.path)}
+                        className={cn(
+                          "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
+                          selectedFile?.path === file.path
+                            ? "bg-accent text-foreground font-medium shadow-2xs"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                        )}
+                      >
+                        <FileCode className="h-3 w-3 shrink-0" />
+                        <span className="truncate">
+                          {file.path.replace("lib/", "")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-              <div className="flex items-center gap-1.5">
-                {isGenerating ? (
-                  <>
-                    <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
-                    <span className="text-[10px] font-mono text-primary font-medium">
-                      Generating
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span
-                      className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
-                      aria-hidden="true"
-                    />
-                    <span className="text-[10px] font-mono text-muted-foreground hidden sm:inline">
-                      Ready
-                    </span>
-                  </>
-                )}
-              </div>
+              {/* Public Directory */}
+              {fileGroups.public.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-semibold text-foreground">
+                    <Folder className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span>public/</span>
+                  </div>
+                  <div className="pl-3 space-y-0.5 border-l border-border/40 ml-2">
+                    {fileGroups.public.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => setSelectedFilePath(file.path)}
+                        className={cn(
+                          "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
+                          selectedFile?.path === file.path
+                            ? "bg-accent text-foreground font-medium shadow-2xs"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                        )}
+                      >
+                        <FileCode className="h-3 w-3 shrink-0" />
+                        <span className="truncate">
+                          {file.path.replace("public/", "")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Root-Level Configuration Files */}
+              {fileGroups.rootConfig.length > 0 && (
+                <div className="space-y-1 pt-2 border-t border-border/40">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                    <Settings className="h-3 w-3 shrink-0" />
+                    <span>Root Config</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {fileGroups.rootConfig.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => setSelectedFilePath(file.path)}
+                        className={cn(
+                          "w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left transition-colors cursor-pointer truncate",
+                          selectedFile?.path === file.path
+                            ? "bg-accent text-foreground font-medium shadow-2xs"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                        )}
+                      >
+                        <FileJson className="h-3 w-3 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-mono text-[11px]">
+                          {file.path}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Browser Frame Inner Content */}
-            <div className="flex-1 overflow-y-auto p-6 sm:p-10 flex flex-col items-center justify-center text-center select-text">
-              {isGenerating ? (
-                <div className="space-y-4 max-w-md animate-pulse">
-                  <div className="flex h-12 w-12 mx-auto items-center justify-center rounded-2xl border border-border bg-muted/50 text-foreground shadow-2xs">
-                    <Loader2 className="h-6 w-6 animate-spin text-primary" />
-                  </div>
-                  <h2 className="text-lg font-semibold tracking-tight text-foreground">
-                    Generating your application...
-                  </h2>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    NVIDIA hosted inference is analyzing your preferences,
-                    generating layout components, and applying design tokens.
-                  </p>
-                </div>
-              ) : (
+            {/* Code Viewer (Right sub-panel) */}
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-background">
+              {selectedFile ? (
                 <>
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted/50 text-foreground mb-4 shadow-2xs">
-                    <Sparkles className="h-5 w-5" />
-                  </div>
-
-                  <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-foreground mb-2">
-                    {project?.name ?? "Your workspace starts here"}
-                  </h2>
-                  <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed text-balance mb-8 px-2 max-w-lg">
-                    {project?.prompt
-                      ? `Initialized with prompt: "${project.prompt}"`
-                      : "Describe components, layouts, or pages in the chat on the left to transform this starter template into a complete application."}
-                  </p>
-
-                  {/* Active Template Status Card */}
-                  <div className="w-full max-w-md rounded-xl border border-border/80 bg-muted/30 p-4 text-left mb-6 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-foreground">
-                        Active Files ({normalizedFiles.length})
-                      </span>
-                      <Badge
-                        variant="outline"
-                        className="font-mono text-[10px]"
-                      >
-                        Next.js 16 + Base UI
-                      </Badge>
+                  <div className="h-9 px-4 border-b border-border flex items-center justify-between shrink-0 bg-muted/20">
+                    <div className="flex items-center gap-2 font-mono text-xs text-foreground">
+                      <FileCode className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="font-semibold">{selectedFile.path}</span>
                     </div>
-                    <div className="flex flex-wrap gap-1.5 pt-1">
-                      {normalizedFiles.slice(0, 7).map((f) => (
-                        <span
-                          key={f.path}
-                          className="text-[10px] font-mono px-2 py-0.5 rounded bg-background border border-border/60 text-muted-foreground"
-                        >
-                          {f.path}
-                        </span>
-                      ))}
-                      {normalizedFiles.length > 7 && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-background border border-border/60 text-muted-foreground">
-                          +{normalizedFiles.length - 7} more
-                        </span>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      onClick={handleCopyCode}
+                      className="gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                    >
+                      {hasCopiedCode ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-emerald-500" />
+                          <span className="text-emerald-500">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5" />
+                          <span>Copy</span>
+                        </>
                       )}
-                    </div>
+                    </Button>
                   </div>
 
-                  {/* Starter Suggestion Blueprint Cards */}
-                  <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-3 text-left">
-                    {STARTER_TEMPLATES.map((item) => {
-                      const IconComponent = item.icon;
-                      return (
-                        <div
-                          key={item.title}
-                          className="group rounded-xl border border-border/80 bg-muted/20 p-3.5 hover:bg-accent/40 hover:border-foreground/20 transition-all cursor-pointer shadow-2xs flex flex-col justify-between"
-                        >
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-muted text-foreground">
-                                <IconComponent className="h-3.5 w-3.5" />
-                              </div>
-                              <Badge
-                                variant="secondary"
-                                className="text-[9px] font-mono h-4 px-1.5"
-                              >
-                                {item.badge}
-                              </Badge>
-                            </div>
-
-                            <h3 className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
-                              {item.title}
-                            </h3>
-                            <p className="text-[11px] text-muted-foreground leading-relaxed">
-                              {item.description}
-                            </p>
-                          </div>
-                        </div>
-                      );
-                    })}
+                  <div className="flex-1 min-h-0 overflow-auto p-4 font-mono text-xs select-text leading-relaxed bg-background/50">
+                    <pre className="text-foreground whitespace-pre">
+                      <code>{selectedFile.content}</code>
+                    </pre>
                   </div>
                 </>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+                  No file selected.
+                </div>
               )}
             </div>
           </div>
-        </div>
-      )}
+        ) : (
+          /* Live Browser Preview Surface */
+          <div className="flex-1 overflow-y-auto p-2 sm:p-4 min-h-0 flex items-center justify-center">
+            {/* Dynamic Responsive Browser Frame */}
+            <div
+              className={cn(
+                "h-full min-h-[460px] flex flex-col rounded-xl border border-border bg-card shadow-2xs overflow-hidden transition-all duration-300",
+                viewportMode === "desktop" && "w-full",
+                viewportMode === "tablet" && "w-[768px]",
+                viewportMode === "mobile" && "w-[375px]",
+              )}
+            >
+              {/* Browser Chrome Bar */}
+              <div className="h-8 px-3 border-b border-border/60 bg-muted/30 flex items-center justify-between shrink-0 select-none">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground">
+                  <span>
+                    {previewUrl ? new URL(previewUrl).host : "localhost:3000"}
+                  </span>
+                </div>
+
+                {/* Live Status Pill */}
+                <div className="flex items-center gap-1.5">
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
+                      <span className="text-[10px] font-mono text-primary font-medium">
+                        Generating Code
+                      </span>
+                    </>
+                  ) : status === "booting" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-muted-foreground" />
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        Booting Node
+                      </span>
+                    </>
+                  ) : status === "mounting" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-muted-foreground" />
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        Mounting Files
+                      </span>
+                    </>
+                  ) : status === "installing" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
+                      <span className="text-[10px] font-mono text-primary font-medium">
+                        Installing npm
+                      </span>
+                    </>
+                  ) : status === "starting-server" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
+                      <span className="text-[10px] font-mono text-amber-500 font-medium">
+                        Starting Next.js
+                      </span>
+                    </>
+                  ) : status === "ready" ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
+                        aria-hidden="true"
+                      />
+                      <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 font-medium">
+                        Preview Ready
+                      </span>
+                    </>
+                  ) : status === "error" ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-destructive"
+                        aria-hidden="true"
+                      />
+                      <span className="text-[10px] font-mono text-destructive font-medium">
+                        Runtime Error
+                      </span>
+                    </>
+                  ) : status === "unsupported" ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-amber-500"
+                        aria-hidden="true"
+                      />
+                      <span className="text-[10px] font-mono text-amber-500 font-medium">
+                        Isolation Required
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      Idle
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Browser Frame Inner: Iframe or Loading/Error Overlay */}
+              <div className="flex-1 w-full h-full relative overflow-hidden bg-background">
+                {status === "ready" && previewUrl ? (
+                  <iframe
+                    ref={iframeRef}
+                    src={previewUrl}
+                    className="w-full h-full border-0 bg-background"
+                    title="Foundry Application Preview"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                  />
+                ) : status === "unsupported" ? (
+                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-amber-500/20 bg-amber-500/10 text-amber-500 shadow-2xs">
+                      <ShieldAlert className="h-6 w-6" />
+                    </div>
+                    <h3 className="text-base font-semibold text-foreground">
+                      Cross-Origin Isolation Required
+                    </h3>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      WebContainers run an in-browser Node.js runtime and
+                      require SharedArrayBuffer with Cross-Origin Opener Policy
+                      (COOP) and Cross-Origin Embedder Policy (COEP).
+                    </p>
+                    <p className="text-[11px] text-muted-foreground font-mono bg-muted/60 p-2 rounded border border-border">
+                      COOP: same-origin | COEP: credentialless
+                    </p>
+                  </div>
+                ) : status === "error" ? (
+                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 select-text">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive shadow-2xs">
+                      <AlertCircle className="h-6 w-6" />
+                    </div>
+                    <h3 className="text-base font-semibold text-foreground">
+                      Preview Execution Error
+                    </h3>
+                    <p className="text-xs text-destructive leading-relaxed font-mono bg-destructive/10 p-2.5 rounded border border-destructive/20 text-left w-full break-words">
+                      {runtimeError ||
+                        "The development server or build process failed to run."}
+                    </p>
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => startWorkspace(normalizedFiles)}
+                        className="gap-1.5 text-xs"
+                      >
+                        <RotateCw className="h-3.5 w-3.5" />
+                        <span>Retry Preview</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => reinstallDependencies(normalizedFiles)}
+                        className="gap-1.5 text-xs"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        <span>Reinstall npm</span>
+                      </Button>
+                      {onRequestFixError && runtimeError && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => onRequestFixError(runtimeError)}
+                          className="gap-1.5 text-xs"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <span>Ask Foundry to Fix</span>
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  /* Loading State (Booting / Installing / Starting Dev Server) */
+                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted/50 text-foreground shadow-2xs">
+                      <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <h3 className="text-sm font-semibold text-foreground">
+                        {status === "booting"
+                          ? "Booting in-browser Node.js runtime..."
+                          : status === "mounting"
+                            ? "Mounting project files..."
+                            : status === "installing"
+                              ? "Installing project dependencies with npm..."
+                              : status === "starting-server"
+                                ? "Starting Next.js development server..."
+                                : "Preparing live preview..."}
+                      </h3>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        Executing safely inside your browser using
+                        WebContainers.
+                      </p>
+                    </div>
+
+                    {logs.length > 0 && (
+                      <p className="text-[11px] font-mono text-muted-foreground/80 truncate max-w-xs bg-muted/40 px-2 py-1 rounded border border-border/40">
+                        {logs[logs.length - 1]}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 3. Collapsible WebContainer Terminal Drawer */}
+        {showTerminal && (
+          <div className="h-52 border-t border-border bg-black/95 text-emerald-400 font-mono text-xs flex flex-col shrink-0 select-text z-20 shadow-lg">
+            {/* Terminal Header */}
+            <div className="h-7 px-3 border-b border-border/40 bg-white/5 flex items-center justify-between shrink-0 text-muted-foreground select-none">
+              <div className="flex items-center gap-2 text-[11px]">
+                <Terminal className="h-3 w-3 text-emerald-400" />
+                <span className="font-semibold text-foreground">
+                  WebContainer Process Output
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  ({logs.length} lines)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleCopyLogs}
+                  className="px-2 py-0.5 rounded text-[10px] hover:bg-white/10 text-muted-foreground hover:text-foreground cursor-pointer flex items-center gap-1"
+                >
+                  {hasCopiedLogs ? (
+                    <>
+                      <Check className="h-3 w-3 text-emerald-400" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3 w-3" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTerminalExplicitState(false)}
+                  className="px-1.5 py-0.5 rounded text-[11px] hover:bg-white/10 text-muted-foreground hover:text-foreground cursor-pointer"
+                  title="Close terminal drawer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Terminal Output Stream */}
+            <div className="flex-1 overflow-y-auto p-3 space-y-0.5 font-mono text-[11px] leading-relaxed select-text">
+              {logs.length === 0 ? (
+                <div className="text-muted-foreground italic">
+                  No process output recorded yet.
+                </div>
+              ) : (
+                logs.map((log, idx) => (
+                  <div
+                    key={`${idx}_${log.slice(0, 10)}`}
+                    className={cn(
+                      "whitespace-pre-wrap break-words",
+                      log.includes("ERROR") || log.includes("failed")
+                        ? "text-rose-400"
+                        : log.includes("ready") || log.includes("Synced")
+                          ? "text-emerald-400"
+                          : "text-zinc-300",
+                    )}
+                  >
+                    {log}
+                  </div>
+                ))
+              )}
+              <div ref={terminalLogsEndRef} />
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

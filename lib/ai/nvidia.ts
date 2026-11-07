@@ -6,7 +6,9 @@ import type {
   ClarificationResult,
   ClarificationQuestion,
   ClarificationOption,
+  GenerateWebsiteOptions,
 } from "./types";
+import { formatReferencesForPrompt } from "./references";
 
 /**
  * Server-only NVIDIA Hosted Inference API Provider for Foundry.
@@ -17,17 +19,15 @@ import type {
 
 const DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 const DEFAULT_NVIDIA_MODEL = "z-ai/glm-5.3-flash";
-const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for reasoning model generation
-const CLARIFICATION_TIMEOUT_MS = 180_000; // 3 minutes for clarification questions
-const MAX_GENERATION_TOKENS = 4096;
-const MAX_CLARIFICATION_TOKENS = 1024;
+const DEFAULT_TIMEOUT_MS =
+  Number(process.env.NVIDIA_TIMEOUT_MS) > 0
+    ? Number(process.env.NVIDIA_TIMEOUT_MS)
+    : 600_000; // 10 minutes for reasoning model generation & full page emission
+const CLARIFICATION_TIMEOUT_MS = 60_000; // 1 minute max for clarification check
+const MAX_GENERATION_TOKENS = 8192; // 8192 tokens for complete multi-section landing pages
+const MAX_CLARIFICATION_TOKENS = 800;
 
-export type GenerateWebsiteOptions = {
-  readonly prompt: string;
-  readonly existingFiles: readonly FileModification[];
-  readonly previousMessages?: readonly AIModelMessage[];
-  readonly timeoutMs?: number;
-};
+export type { GenerateWebsiteOptions } from "./types";
 
 /**
  * Parses raw model output text and extracts structured JSON.
@@ -234,17 +234,27 @@ export async function assessClarificationWithNvidia(
   }
 
   const trimmed = prompt.trim();
-  // Fast heuristic: If prompt is exceptionally detailed (> 70 words or contains specific layout keywords), skip clarification
-  const wordCount = trimmed.split(/\s+/).length;
-  const hasSpecificDesignDirectives =
-    /(header|hero|navbar|footer|pricing|testimonials|cards|sidebar|grid|faq)/i.test(
-      trimmed,
-    ) &&
-    /(color|theme|palette|font|dark mode|light mode|minimal|luxury)/i.test(
+  const words = trimmed.split(/\s+/);
+  const wordCount = words.length;
+
+  // Detect specific section requests
+  const sectionMatches = trimmed.match(
+    /(header|hero|navbar|search|listing|property|properties|service|services|about|intro|introduction|testimonial|testimonials|review|reviews|contact|footer|pricing|feature|features|portfolio|gallery|faq)/gi,
+  );
+  const uniqueSections = new Set(sectionMatches?.map((s) => s.toLowerCase()));
+
+  // Detect visual/styling directives
+  const hasStyleDirectives =
+    /(color|theme|palette|font|typography|dark|light|minimal|luxury|gold|black|white|elegant|modern|aesthetic|responsive|clean)/i.test(
       trimmed,
     );
 
-  if (wordCount > 70 && hasSpecificDesignDirectives) {
+  // Fast heuristic: If prompt is already specific (specifies multiple sections & visual directives, or is comprehensive), skip clarification
+  if (
+    (uniqueSections.size >= 3 && hasStyleDirectives) ||
+    (wordCount >= 45 && uniqueSections.size >= 2) ||
+    wordCount >= 65
+  ) {
     return { needsClarification: false };
   }
 
@@ -320,6 +330,7 @@ Important Rules:
         ],
         temperature: 0.1,
         max_tokens: MAX_CLARIFICATION_TOKENS,
+        reasoning_effort: "low",
       }),
       signal: controller.signal,
     });
@@ -358,11 +369,15 @@ Important Rules:
  * Builds the system instructions for the model, providing context about available
  * UI primitives, Tailwind v4 theme tokens, and the required JSON schema.
  */
-function buildSystemPrompt(existingFiles: readonly FileModification[]): string {
+function buildSystemPrompt(
+  existingFiles: readonly FileModification[],
+  references?: readonly import("./types").DesignReference[],
+): string {
   const existingFileList = existingFiles.map((f) => `- ${f.path}`).join("\n");
+  const referencesSection = formatReferencesForPrompt(references);
 
-  return `You are Foundry's expert full-stack Next.js and Tailwind CSS AI engineer.
-Your task is to generate the user's requested website inside an existing Next.js 16 + Tailwind CSS v4 project.
+  return `You are Foundry's expert full-stack Next.js, React 19, and Tailwind CSS AI engineer.
+Your task is to generate the user's requested single-page landing website inside an existing Next.js 16 + Tailwind CSS v4 project.
 
 ### Project Architecture & Established File Structure:
 - Root-level configuration files are ALREADY configured and fixed:
@@ -381,16 +396,29 @@ Your task is to generate the user's requested website inside an existing Next.js
   - components/ui/card.tsx (Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter)
   - components/ui/badge.tsx (Badge with default, secondary, outline, destructive)
 - Icons: lucide-react (import { ArrowRight, Check, Sparkles, Star, Shield, Search } from "lucide-react")
+- Animation: motion (import { motion } from "motion/react") for smooth transitions, entry animations, and hover effects.
 
 ### Existing Project Files in Repository:
 ${existingFileList}
+${referencesSection ? `\n${referencesSection}\n` : ""}
+### Free Photography Sourcing (Unsplash):
+When the landing page benefits from visual imagery (hero visual, feature cards, showcase, team, testimonials):
+- Use clean, functional Unsplash image URLs with auto=format&fit=crop&w=1200&q=80 query parameters.
+- Verified photography candidates:
+  - Tech / SaaS: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80"
+  - Architecture / Real Estate: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80"
+  - Creative / Studio: "https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=1200&q=80"
+  - Testimonial Avatars: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80", "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=300&q=80"
+- Apply responsive aspect ratio classes (e.g. aspect-video, aspect-square), object-cover, and loading="lazy" for below-the-fold images.
+- Do NOT embed large base64 images into TSX code.
 
 ### Strict Generation Scope:
 1. Generate a complete, polished, production-ready "app/page.tsx" containing all requested sections (Hero, Features, Showcase, Testimonials, CTA, Footer).
 2. Reuse the existing shadcn/ui components (@/components/ui/button, @/components/ui/card, @/components/ui/badge) and @/lib/utils (cn).
 3. Do NOT generate unnecessary configuration files or invent fake folders like "config/".
-4. Never truncate code with comments like "// ...rest of code". Provide 100% complete TypeScript TSX code.
-5. app/page.tsx MUST include "export default function Page() { ... }".
+4. Keep mock data items concise (e.g. 3 featured cards/properties, 2-3 testimonials/services) so the entire page is clean, modular, and completes reliably within token limits.
+5. Never truncate code with comments like "// ...rest of code". Provide 100% complete TypeScript TSX code.
+6. app/page.tsx MUST include "export default function Page() { ... }" or "export default function HomePage() { ... }".
 
 ### Strict JSON Output Schema:
 You MUST reply with ONLY a single, valid JSON object.
@@ -435,7 +463,7 @@ export async function generateWebsiteWithNvidia(
 
   const systemMessage: AIModelMessage = {
     role: "system",
-    content: buildSystemPrompt(options.existingFiles),
+    content: buildSystemPrompt(options.existingFiles, options.references),
   };
 
   const messages: AIModelMessage[] = [
@@ -459,6 +487,8 @@ export async function generateWebsiteWithNvidia(
         messages,
         temperature: 0.2,
         max_tokens: MAX_GENERATION_TOKENS,
+        reasoning_effort: "low",
+        stream: true,
       }),
       signal: controller.signal,
     });
@@ -483,36 +513,92 @@ export async function generateWebsiteWithNvidia(
       };
     }
 
-    const data = (await response.json()) as {
-      choices?: Array<{
-        message?: {
-          content?: string | null;
-          reasoning_content?: string | null;
-        };
-        finish_reason?: string;
-      }>;
-      usage?: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        completion_tokens_details?: {
-          reasoning_tokens?: number;
+    let content: string | null = null;
+    let finishReason: string | undefined;
+    let promptTokens: number | undefined;
+    let completionTokens: number | undefined;
+    let reasoningTokens: number | undefined;
+
+    // Resilient Streaming SSE handling (prevents TCP idle drops during long generations)
+    if (response.body && typeof response.body.getReader === "function") {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedContent = "";
+      let accumulatedReasoning = "";
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine || !trimmedLine.startsWith("data:")) continue;
+          const dataStr = trimmedLine.slice(5).trim();
+          if (dataStr === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(dataStr);
+            const choice = parsed.choices?.[0];
+            if (choice?.finish_reason) {
+              finishReason = choice.finish_reason;
+            }
+            if (choice?.delta?.content) {
+              accumulatedContent += choice.delta.content;
+            }
+            if (choice?.delta?.reasoning_content) {
+              accumulatedReasoning += choice.delta.reasoning_content;
+            }
+            if (parsed.usage) {
+              promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
+              completionTokens =
+                parsed.usage.completion_tokens ?? completionTokens;
+              reasoningTokens =
+                parsed.usage.completion_tokens_details?.reasoning_tokens ??
+                reasoningTokens;
+            }
+          } catch {
+            // Ignore partial SSE chunks
+          }
+        }
+      }
+
+      content = accumulatedContent || accumulatedReasoning || null;
+    } else {
+      // Fallback for mocked unit tests and non-streaming environments
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string | null;
+            reasoning_content?: string | null;
+          };
+          finish_reason?: string;
+        }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          completion_tokens_details?: {
+            reasoning_tokens?: number;
+          };
         };
       };
-    };
 
-    const choice = data.choices?.[0];
-    if (!choice || !choice.message) {
-      return {
-        success: false,
-        code: "MALFORMED_OUTPUT",
-        error: "NVIDIA API returned an empty choices array.",
-      };
-    }
-
-    // Handle reasoning models where content may be in message.content
-    let content = choice.message.content;
-    if (!content && choice.message.reasoning_content) {
-      content = choice.message.reasoning_content;
+      const choice = data.choices?.[0];
+      if (choice) {
+        finishReason = choice.finish_reason;
+        content =
+          choice.message?.content || choice.message?.reasoning_content || null;
+      }
+      if (data.usage) {
+        promptTokens = data.usage.prompt_tokens;
+        completionTokens = data.usage.completion_tokens;
+        reasoningTokens =
+          data.usage.completion_tokens_details?.reasoning_tokens;
+      }
     }
 
     if (!content) {
@@ -520,8 +606,8 @@ export async function generateWebsiteWithNvidia(
         success: false,
         code: "MALFORMED_OUTPUT",
         error:
-          choice.finish_reason === "length"
-            ? "Generation stopped due to output length limit. Try a simpler prompt or request specific components."
+          finishReason === "length"
+            ? "Generation stopped due to output length limit. Try requesting fewer sections at a time."
             : "Model did not return any content.",
       };
     }
@@ -544,10 +630,9 @@ export async function generateWebsiteWithNvidia(
       success: true,
       output: structuredOutput,
       usage: {
-        promptTokens: data.usage?.prompt_tokens,
-        completionTokens: data.usage?.completion_tokens,
-        reasoningTokens:
-          data.usage?.completion_tokens_details?.reasoning_tokens,
+        promptTokens,
+        completionTokens,
+        reasoningTokens,
       },
     };
   } catch (err) {

@@ -29,7 +29,7 @@ export function getStarterTemplateFiles(
           version: "0.1.0",
           private: true,
           scripts: {
-            dev: "next dev",
+            dev: "next dev --webpack",
             build: "next build",
             start: "next start",
             lint: "eslint",
@@ -39,6 +39,7 @@ export function getStarterTemplateFiles(
             "class-variance-authority": "^0.7.1",
             cn: "^0.5.0",
             "lucide-react": "^1.62.0",
+            motion: "^12.0.0",
             next: "16.4.3",
             "next-themes": "^0.4.6",
             react: "19.3.0",

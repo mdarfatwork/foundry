@@ -1,7 +1,27 @@
 /**
- * Core types for AI code generation and clarification in Foundry.
- * Adheres to AGENTS.md §5.2, §5.3, and Prompt §5, §6.
+ * Core types for AI code generation, multi-provider inference, and clarification in Foundry.
+ * Adheres to AGENTS.md §5.2, §5.3, and Prompt §4, §5, §6.
  */
+
+export type AIProvider = "nvidia" | "google" | "openrouter";
+
+export type UrlReference = {
+  readonly type: "url";
+  readonly url: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly notes?: string;
+};
+
+export type ImageReference = {
+  readonly type: "image";
+  readonly imageUrl?: string;
+  readonly imageBase64?: string;
+  readonly mimeType?: string;
+  readonly notes?: string;
+};
+
+export type DesignReference = UrlReference | ImageReference;
 
 export type FileModification = {
   readonly path: string;
@@ -39,6 +59,7 @@ export type ClarificationPayload = {
   readonly originalPrompt: string;
   readonly answered?: boolean;
   readonly answers?: Record<string, readonly string[]>;
+  readonly references?: readonly DesignReference[];
 };
 
 export type ClarificationResult =
@@ -50,10 +71,23 @@ export type ClarificationResult =
       readonly needsClarification: false;
     };
 
+export type GenerateWebsiteOptions = {
+  readonly prompt: string;
+  readonly existingFiles: readonly FileModification[];
+  readonly previousMessages?: readonly AIModelMessage[];
+  readonly references?: readonly DesignReference[];
+  readonly provider?: AIProvider;
+  readonly model?: string;
+  readonly timeoutMs?: number;
+};
+
 export type AIGenerationResult =
   | {
       readonly success: true;
       readonly output: GenerationOutput;
+      readonly provider?: AIProvider | string;
+      readonly model?: string;
+      readonly latencyMs?: number;
       readonly usage?: {
         readonly promptTokens?: number;
         readonly completionTokens?: number;
@@ -70,6 +104,8 @@ export type AIGenerationResult =
         | "PROVIDER_ERROR"
         | "MALFORMED_OUTPUT"
         | "VALIDATION_FAILED";
+      readonly provider?: AIProvider | string;
+      readonly model?: string;
     };
 
 export type ValidationResult =

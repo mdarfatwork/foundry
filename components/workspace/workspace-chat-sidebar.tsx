@@ -19,19 +19,36 @@ import {
   Loader2,
   Check,
   FastForward,
+  Globe,
+  ImageIcon,
+  X,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+} from "@/components/ui/dropdown-menu";
+import {
   generateProjectCodeAction,
   submitClarificationAnswersAction,
+  inspectReferenceUrlAction,
 } from "@/app/actions/generation";
 import type { ProjectMessageRecord } from "@/app/actions/project";
 import type {
   FileModification,
   ClarificationPayload,
   ClarificationQuestion,
+  AIProvider,
+  DesignReference,
+  UrlReference,
 } from "@/lib/ai/types";
+import { validateImageReference } from "@/lib/ai/references";
 import { cn } from "@/lib/utils";
 
 type LocalMessage = {
@@ -51,6 +68,8 @@ type WorkspaceChatSidebarProps = Readonly<{
   onGeneratingChange?: (generating: boolean) => void;
   onFilesUpdated?: (updatedFiles: readonly FileModification[]) => void;
   className?: string;
+  externalPromptPrefill?: string | null;
+  onClearExternalPrompt?: () => void;
 }>;
 
 function formatMessageTimestamp(dateInput?: Date | string | null): string {
@@ -136,7 +155,6 @@ function ClarificationQuestionCard({
 
     const defaults: Record<string, string[]> = {};
     for (const q of payload.questions) {
-      // Default to first option
       if (q.options.length > 0) {
         defaults[q.id] = [q.options[0].label];
       }
@@ -177,6 +195,7 @@ function ClarificationQuestionCard({
         messageId,
         payload.originalPrompt,
         selectedAnswers,
+        payload.references,
       );
 
       if (res.success && res.data.type === "generated") {
@@ -199,7 +218,10 @@ function ClarificationQuestionCard({
       const res = await generateProjectCodeAction(
         projectId,
         payload.originalPrompt,
-        { skipClarification: true },
+        {
+          skipClarification: true,
+          references: payload.references,
+        },
       );
 
       if (res.success && res.data.type === "generated") {
@@ -275,7 +297,7 @@ function ClarificationQuestionCard({
         })}
       </div>
 
-      {/* Action Buttons (Only when not already answered) */}
+      {/* Action Buttons */}
       {!payload.answered && (
         <div className="pt-2 border-t border-border/40 flex items-center justify-between gap-2">
           <Button
@@ -317,7 +339,8 @@ function ClarificationQuestionCard({
 
 /**
  * Dedicated Chat Sidebar for Foundry Workspace.
- * Connects the docked prompt composer to NVIDIA-powered code generation with adaptive MCQ clarification.
+ * Connects prompt composer to Multi-Provider AI generation with design references,
+ * adaptive MCQ clarification, and error remediation.
  * Adheres strictly to AGENTS.md §1, §5.1, §5.3, §5.4 and DESIGN.md.
  */
 export function WorkspaceChatSidebar({
@@ -327,11 +350,45 @@ export function WorkspaceChatSidebar({
   onGeneratingChange,
   onFilesUpdated,
   className,
+  externalPromptPrefill,
+  onClearExternalPrompt,
 }: WorkspaceChatSidebarProps) {
   const [inputValue, setInputValue] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] =
+    useState<AIProvider>("nvidia");
+
+  // References state
+  const [attachedScreenshot, setAttachedScreenshot] = useState<{
+    base64: string;
+    mimeType: string;
+    name: string;
+  } | null>(null);
+  const [attachedUrl, setAttachedUrl] = useState<UrlReference | null>(null);
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [urlInputValue, setUrlInputValue] = useState("");
+  const [isInspectingUrl, setIsInspectingUrl] = useState(false);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync external prompt prefill during render (e.g. from Canvas "Ask Foundry to Fix")
+  const [prevPrefill, setPrevPrefill] = useState<string | null>(null);
+  if (externalPromptPrefill && externalPromptPrefill !== prevPrefill) {
+    setPrevPrefill(externalPromptPrefill);
+    setInputValue(externalPromptPrefill);
+    onClearExternalPrompt?.();
+  }
+
+  // Focus textarea when external prompt prefill arrives
+  useEffect(() => {
+    if (externalPromptPrefill && textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = `${Math.min(Math.max(textareaRef.current.scrollHeight, 48), 140)}px`;
+    }
+  }, [externalPromptPrefill]);
 
   // Map incoming persistent messages to local state
   const [messages, setMessages] = useState<readonly LocalMessage[]>(() => {
@@ -351,13 +408,13 @@ export function WorkspaceChatSidebar({
         id: "msg-welcome",
         role: "assistant",
         content:
-          "Welcome to your Foundry workspace! I've set up your Next.js application with Tailwind CSS and Base UI components. Describe what you want to create, or request specific layouts, components, and visual themes.",
+          "Welcome to your Foundry workspace! I've set up your Next.js application with Tailwind CSS and Base UI components. Describe what you want to create, upload design screenshots, or provide reference URLs.",
         timestamp: "Just now",
         details: [
           "Initialized Next.js 16 App Router foundation",
           "Configured Tailwind CSS v4 semantic tokens",
-          "Added Base UI button, card, and badge components",
-          "Ready to generate custom pages and components",
+          "Added Base UI button, card, and badge primitives",
+          "WebContainer browser runtime ready for live preview",
         ],
       },
     ];
@@ -392,6 +449,65 @@ export function WorkspaceChatSidebar({
     );
   };
 
+  const handleScreenshotSelected = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setErrorMessage("Only PNG, JPEG, and WebP images are supported.");
+      return;
+    }
+
+    if (file.size > 4 * 1024 * 1024) {
+      setErrorMessage("Screenshot must be under 4 MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = reader.result as string;
+      const validation = validateImageReference(res, file.type);
+      if (!validation.valid) {
+        setErrorMessage(validation.error || "Invalid image.");
+        return;
+      }
+
+      setAttachedScreenshot({
+        base64: res,
+        mimeType: file.type,
+        name: file.name,
+      });
+      setErrorMessage(null);
+    };
+    reader.readAsDataURL(file);
+
+    // Reset file input
+    e.target.value = "";
+  };
+
+  const handleInspectUrl = async () => {
+    const candidate = urlInputValue.trim();
+    if (!candidate) return;
+
+    setIsInspectingUrl(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await inspectReferenceUrlAction(candidate);
+      if (res.success) {
+        setAttachedUrl(res.data);
+        setShowUrlInput(false);
+        setUrlInputValue("");
+      } else {
+        setErrorMessage(res.error);
+      }
+    } catch {
+      setErrorMessage("Failed to inspect reference URL.");
+    } finally {
+      setIsInspectingUrl(false);
+    }
+  };
+
   const handleSubmit = async (e?: FormEvent) => {
     e?.preventDefault();
     const promptText = inputValue.trim();
@@ -402,6 +518,24 @@ export function WorkspaceChatSidebar({
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
+
+    // Build references array from attachments
+    const references: DesignReference[] = [];
+    if (attachedScreenshot) {
+      references.push({
+        type: "image",
+        imageBase64: attachedScreenshot.base64,
+        mimeType: attachedScreenshot.mimeType,
+        notes: `User uploaded screenshot: ${attachedScreenshot.name}`,
+      });
+    }
+    if (attachedUrl) {
+      references.push(attachedUrl);
+    }
+
+    // Clear attachments after queueing
+    setAttachedScreenshot(null);
+    setAttachedUrl(null);
 
     // 1. Optimistically append user message
     const userMessage: LocalMessage = {
@@ -416,8 +550,11 @@ export function WorkspaceChatSidebar({
     onGeneratingChange?.(true);
 
     try {
-      // 3. Trigger Generation Server Action
-      const response = await generateProjectCodeAction(projectId, promptText);
+      // 3. Trigger Generation Server Action with provider and references
+      const response = await generateProjectCodeAction(projectId, promptText, {
+        references,
+        provider: selectedProvider,
+      });
 
       if (response.success) {
         if (response.data.type === "clarification") {
@@ -432,6 +569,7 @@ export function WorkspaceChatSidebar({
               questions: response.data.questions,
               originalPrompt: response.data.originalPrompt,
               answered: false,
+              references,
             },
           };
           setMessages((prev) => [...prev, clarificationMessage]);
@@ -498,19 +636,79 @@ export function WorkspaceChatSidebar({
       )}
       aria-label="Assistant conversation panel"
     >
-      {/* 1. Chat Header */}
+      {/* 1. Chat Header with Provider Switcher */}
       <div className="h-10 px-3.5 border-b border-border bg-background/50 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-foreground" />
           <span className="text-xs font-semibold tracking-tight text-foreground">
             Chat
           </span>
-          <Badge
-            variant="secondary"
-            className="font-mono text-[10px] h-4.5 px-1.5 font-normal text-muted-foreground"
-          >
-            NVIDIA GLM-5
-          </Badge>
+
+          {/* AI Provider Switcher Dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border border-border/60 bg-muted/60 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+                  aria-label="Select AI provider"
+                >
+                  <span>
+                    {selectedProvider === "nvidia"
+                      ? "NVIDIA GLM-5"
+                      : selectedProvider === "google"
+                        ? "Google Gemini"
+                        : "OpenRouter"}
+                  </span>
+                  <ChevronDown className="h-2.5 w-2.5 opacity-60" />
+                </button>
+              }
+            />
+            <DropdownMenuContent align="start" className="w-48 p-1">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="text-[10px] text-muted-foreground px-2 py-1">
+                  AI Model Provider
+                </DropdownMenuLabel>
+                <DropdownMenuItem
+                  onClick={() => setSelectedProvider("nvidia")}
+                  className={cn(
+                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
+                    selectedProvider === "nvidia" && "font-medium bg-accent",
+                  )}
+                >
+                  <span>NVIDIA GLM-5.3</span>
+                  {selectedProvider === "nvidia" && (
+                    <Check className="h-3 w-3 text-primary" />
+                  )}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setSelectedProvider("google")}
+                  className={cn(
+                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
+                    selectedProvider === "google" && "font-medium bg-accent",
+                  )}
+                >
+                  <span>Google Gemini 3.5</span>
+                  {selectedProvider === "google" && (
+                    <Check className="h-3 w-3 text-primary" />
+                  )}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setSelectedProvider("openrouter")}
+                  className={cn(
+                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
+                    selectedProvider === "openrouter" &&
+                      "font-medium bg-accent",
+                  )}
+                >
+                  <span>OpenRouter (Free)</span>
+                  {selectedProvider === "openrouter" && (
+                    <Check className="h-3 w-3 text-primary" />
+                  )}
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <Button
@@ -613,12 +811,12 @@ export function WorkspaceChatSidebar({
               </div>
               <span className="font-semibold text-foreground">Foundry</span>
               <span className="text-[10px] font-mono text-muted-foreground">
-                Generating with NVIDIA NIM...
+                Generating landing page...
               </span>
             </div>
             <div className="pl-7 text-xs text-muted-foreground">
-              Synthesizing components, applying semantic tokens, and validating
-              files...
+              Synthesizing Next.js components, applying Tailwind OKLCH tokens,
+              and validating files...
             </div>
           </div>
         )}
@@ -635,7 +833,7 @@ export function WorkspaceChatSidebar({
             <button
               type="button"
               onClick={() => setErrorMessage(null)}
-              className="text-destructive font-bold ml-2 hover:opacity-80"
+              className="text-destructive font-bold ml-2 hover:opacity-80 cursor-pointer"
               aria-label="Dismiss error"
             >
               ✕
@@ -643,12 +841,103 @@ export function WorkspaceChatSidebar({
           </div>
         )}
 
+        {/* Attached Design References Display */}
+        {(attachedScreenshot || attachedUrl) && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachedScreenshot && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-muted text-[11px] text-foreground border border-border">
+                <ImageIcon className="h-3 w-3 text-primary shrink-0" />
+                <span className="truncate max-w-[120px] font-mono text-[10px]">
+                  {attachedScreenshot.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAttachedScreenshot(null)}
+                  className="text-muted-foreground hover:text-foreground cursor-pointer"
+                  aria-label="Remove screenshot"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            {attachedUrl && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-muted text-[11px] text-foreground border border-border">
+                <Globe className="h-3 w-3 text-emerald-500 shrink-0" />
+                <span className="truncate max-w-[140px] font-mono text-[10px]">
+                  {attachedUrl.title || attachedUrl.url}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAttachedUrl(null)}
+                  className="text-muted-foreground hover:text-foreground cursor-pointer"
+                  aria-label="Remove reference URL"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Inline URL Input Form */}
+        {showUrlInput && (
+          <div className="mb-2 p-2 rounded-lg border border-border bg-card flex items-center gap-1.5">
+            <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <input
+              type="url"
+              placeholder="https://example.com"
+              value={urlInputValue}
+              onChange={(e) => setUrlInputValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleInspectUrl();
+                }
+              }}
+              className="flex-1 bg-transparent text-xs outline-none text-foreground placeholder:text-muted-foreground"
+            />
+            <Button
+              type="button"
+              size="xs"
+              onClick={handleInspectUrl}
+              disabled={isInspectingUrl || !urlInputValue.trim()}
+              className="text-[10px] h-6 px-2"
+            >
+              {isInspectingUrl ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                "Add"
+              )}
+            </Button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowUrlInput(false);
+                setUrlInputValue("");
+              }}
+              className="text-muted-foreground hover:text-foreground p-1 cursor-pointer"
+              aria-label="Cancel URL input"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+
+        {/* Hidden File Input for Screenshots */}
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={handleScreenshotSelected}
+        />
+
         <form
           onSubmit={handleSubmit}
           className="rounded-xl border border-border bg-card p-2 shadow-2xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20 transition-all"
         >
           <label htmlFor="workspace-chat-prompt" className="sr-only">
-            Ask Foundry to change something
+            Ask Foundry to build or update your landing page
           </label>
           <textarea
             id="workspace-chat-prompt"
@@ -660,7 +949,7 @@ export function WorkspaceChatSidebar({
             placeholder={
               isGenerating
                 ? "Generation in progress..."
-                : "Ask Foundry to build a page or component..."
+                : "Describe your landing page or request changes..."
             }
             rows={2}
             className="w-full bg-transparent resize-none outline-none text-xs text-foreground placeholder:text-muted-foreground leading-relaxed min-h-[48px] max-h-[140px] disabled:opacity-50"
@@ -668,19 +957,36 @@ export function WorkspaceChatSidebar({
 
           <div className="flex items-center justify-between pt-1 border-t border-border/40 mt-1">
             <div className="flex items-center gap-1">
+              {/* Attach Screenshot */}
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
+                onClick={() => fileInputRef.current?.click()}
                 className="text-muted-foreground hover:text-foreground cursor-pointer"
-                title="Attach context"
-                aria-label="Add attachment"
+                title="Attach design screenshot (PNG, JPEG, WebP)"
+                aria-label="Add screenshot attachment"
                 disabled={isGenerating}
               >
                 <Paperclip className="h-3.5 w-3.5" />
               </Button>
-              <span className="text-[10px] font-mono text-muted-foreground px-1">
-                Enter to submit
+
+              {/* Add Reference Website URL */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => setShowUrlInput((prev) => !prev)}
+                className="text-muted-foreground hover:text-foreground cursor-pointer"
+                title="Add inspiration website URL"
+                aria-label="Add website URL reference"
+                disabled={isGenerating}
+              >
+                <Globe className="h-3.5 w-3.5" />
+              </Button>
+
+              <span className="text-[10px] font-mono text-muted-foreground px-1 hidden sm:inline">
+                Enter to send
               </span>
             </div>
 
@@ -701,7 +1007,7 @@ export function WorkspaceChatSidebar({
         </form>
 
         <p className="text-[10px] text-muted-foreground/80 text-center mt-2 select-none">
-          AI-generated code is validated and saved to your project repository.
+          Live Next.js execution in-browser via WebContainers.
         </p>
       </div>
     </aside>
