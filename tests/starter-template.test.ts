@@ -58,6 +58,8 @@ describe("Starter Template Generator", () => {
     expect(parsed.dependencies["next"]).toBe("16.4.3");
     expect(parsed.dependencies["react"]).toBe("19.3.0");
     expect(parsed.dependencies["@base-ui/react"]).toBe("^1.9.0");
+    expect(parsed.devDependencies["@tailwindcss/postcss"]).toBeDefined();
+    expect(parsed.devDependencies["postcss"]).toBeDefined();
   });
 
   it("generates valid app/page.tsx with export default component", () => {

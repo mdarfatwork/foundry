@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { buildFileSystemTree } from "@/lib/webcontainer/tree";
-import { isLocalOrPrivateHost } from "@/lib/webcontainer/runtime-manager";
+import {
+  isLocalOrPrivateHost,
+  normalizeProjectFiles,
+} from "@/lib/webcontainer/runtime-manager";
 import type { DirectoryNode, FileNode } from "@webcontainer/api";
 
 describe("WebContainer FileSystemTree Builder", () => {
@@ -126,5 +129,56 @@ describe("WebContainer Host Environment Detection", () => {
 
   it("handles empty or falsy host inputs safely", () => {
     expect(isLocalOrPrivateHost("")).toBe(false);
+  });
+});
+
+describe("WebContainer normalizeProjectFiles Helper", () => {
+  it("injects @tailwindcss/postcss and postcss into package.json devDependencies when missing", () => {
+    const rawFiles = [
+      {
+        path: "package.json",
+        content: JSON.stringify({
+          name: "demo",
+          dependencies: { next: "16.4.3" },
+          devDependencies: { tailwindcss: "^4" },
+        }),
+      },
+    ];
+
+    const normalized = normalizeProjectFiles(rawFiles);
+    const parsed = JSON.parse(normalized[0].content);
+
+    expect(parsed.devDependencies["@tailwindcss/postcss"]).toBe("^4");
+    expect(parsed.devDependencies["postcss"]).toBe("^8");
+    expect(parsed.devDependencies["tailwindcss"]).toBe("^4");
+  });
+
+  it("does not overwrite @tailwindcss/postcss if already present in dependencies or devDependencies", () => {
+    const rawFiles = [
+      {
+        path: "package.json",
+        content: JSON.stringify({
+          name: "demo",
+          devDependencies: {
+            "@tailwindcss/postcss": "4.1.0",
+            postcss: "8.4.38",
+          },
+        }),
+      },
+    ];
+
+    const normalized = normalizeProjectFiles(rawFiles);
+    const parsed = JSON.parse(normalized[0].content);
+
+    expect(parsed.devDependencies["@tailwindcss/postcss"]).toBe("4.1.0");
+    expect(parsed.devDependencies["postcss"]).toBe("8.4.38");
+  });
+
+  it("leaves files without package.json intact", () => {
+    const rawFiles = [
+      { path: "app/page.tsx", content: "export default () => null" },
+    ];
+    const normalized = normalizeProjectFiles(rawFiles);
+    expect(normalized).toEqual(rawFiles);
   });
 });

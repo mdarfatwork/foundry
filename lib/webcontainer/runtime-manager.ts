@@ -53,11 +53,63 @@ export function isLocalOrPrivateHost(hostname: string): boolean {
   return false;
 }
 
+/**
+ * Ensures project files include required PostCSS dependencies for Tailwind CSS v4.
+ * Injects @tailwindcss/postcss and postcss into package.json if missing,
+ * preventing webpack module resolution errors in WebContainers.
+ */
+export function normalizeProjectFiles(
+  files: readonly FileEntry[],
+): readonly FileEntry[] {
+  const pkgIndex = files.findIndex((f) => f.path === "package.json");
+  if (pkgIndex === -1) return files;
+
+  const pkgEntry = files[pkgIndex];
+  try {
+    const parsed = JSON.parse(pkgEntry.content);
+    let modified = false;
+
+    if (!parsed.devDependencies) {
+      parsed.devDependencies = {};
+    }
+
+    if (
+      !parsed.devDependencies["@tailwindcss/postcss"] &&
+      !parsed.dependencies?.["@tailwindcss/postcss"]
+    ) {
+      parsed.devDependencies["@tailwindcss/postcss"] = "^4";
+      modified = true;
+    }
+
+    if (
+      !parsed.devDependencies["postcss"] &&
+      !parsed.dependencies?.["postcss"]
+    ) {
+      parsed.devDependencies["postcss"] = "^8";
+      modified = true;
+    }
+
+    if (modified) {
+      const nextFiles = [...files];
+      nextFiles[pkgIndex] = {
+        path: "package.json",
+        content: JSON.stringify(parsed, null, 2),
+      };
+      return nextFiles;
+    }
+  } catch {
+    // Malformed JSON - return untouched
+  }
+
+  return files;
+}
+
 class WebContainerRuntimeManager {
   private instance: WebContainer | null = null;
   private bootPromise: Promise<WebContainer> | null = null;
   private devProcess: WebContainerProcess | null = null;
   private installProcess: WebContainerProcess | null = null;
+  private activePackageManager: "pnpm" | "npm" = "pnpm";
   private listeners: Set<WebContainerListener> = new Set();
   private serverReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -264,13 +316,14 @@ class WebContainerRuntimeManager {
    */
   public async mountProjectFiles(files: readonly FileEntry[]): Promise<void> {
     const container = await this.getWebContainer();
+    const normalizedFiles = normalizeProjectFiles(files);
 
     this.updateState({ status: "mounting" });
     this.appendLog(
-      `[Foundry WebContainer] Mounting ${files.length} project files...`,
+      `[Foundry WebContainer] Mounting ${normalizedFiles.length} project files...`,
     );
 
-    const tree = buildFileSystemTree(files);
+    const tree = buildFileSystemTree(normalizedFiles);
     await container.mount(tree);
     this.appendLog(
       "[Foundry WebContainer] Files mounted to virtual workspace.",
@@ -278,7 +331,7 @@ class WebContainerRuntimeManager {
   }
 
   /**
-   * Installs project dependencies using npm.
+   * Installs project dependencies using pnpm (with graceful npm fallback).
    * Only executes if dependencies have changed or forceInstall is true.
    */
   public async installDependencies(
@@ -286,8 +339,11 @@ class WebContainerRuntimeManager {
     forceInstall = false,
   ): Promise<boolean> {
     const container = await this.getWebContainer();
+    const normalizedFiles = normalizeProjectFiles(files);
 
-    const packageJsonFile = files.find((f) => f.path === "package.json");
+    const packageJsonFile = normalizedFiles.find(
+      (f) => f.path === "package.json",
+    );
     const currentHash = packageJsonFile
       ? this.hashContent(packageJsonFile.content)
       : "no-pkg";
@@ -298,30 +354,48 @@ class WebContainerRuntimeManager {
       this.state.lastInstalledPackageJsonHash === currentHash
     ) {
       this.appendLog(
-        "[Foundry WebContainer] Dependencies up to date. Skipping npm install.",
+        `[Foundry WebContainer] Dependencies up to date. Skipping ${this.activePackageManager} install.`,
       );
       return true;
     }
 
     if (this.state.isInstalling) {
       this.appendLog(
-        "[Foundry WebContainer] npm install is already in progress.",
+        `[Foundry WebContainer] ${this.activePackageManager} install is already in progress.`,
       );
       return false;
     }
 
     this.updateState({ status: "installing", isInstalling: true, error: null });
     this.appendLog(
-      "[Foundry WebContainer] Running npm install --no-audit --no-fund --prefer-offline...",
+      "[Foundry WebContainer] Running pnpm install --prefer-offline...",
     );
 
     try {
-      const process = await container.spawn("npm", [
-        "install",
-        "--no-audit",
-        "--no-fund",
-        "--prefer-offline",
-      ]);
+      let pm: "pnpm" | "npm" = "pnpm";
+      let process: WebContainerProcess;
+
+      try {
+        process = await container.spawn("pnpm", [
+          "install",
+          "--prefer-offline",
+          "--no-frozen-lockfile",
+        ]);
+        this.activePackageManager = "pnpm";
+      } catch (pnpmSpawnErr) {
+        this.appendLog(
+          `[Foundry WebContainer] pnpm spawn failed (${pnpmSpawnErr instanceof Error ? pnpmSpawnErr.message : "error"}), falling back to npm install...`,
+        );
+        pm = "npm";
+        this.activePackageManager = "npm";
+        process = await container.spawn("npm", [
+          "install",
+          "--no-audit",
+          "--no-fund",
+          "--prefer-offline",
+        ]);
+      }
+
       this.installProcess = process;
 
       // Stream stdout/stderr
@@ -333,11 +407,39 @@ class WebContainerRuntimeManager {
         }),
       );
 
-      const exitCode = await process.exit;
+      let exitCode = await process.exit;
       this.installProcess = null;
 
+      // If pnpm failed with non-zero exit code, fallback to npm once
+      if (exitCode !== 0 && pm === "pnpm") {
+        this.appendLog(
+          `[Foundry WebContainer] pnpm install exited with code ${exitCode}. Retrying with npm install fallback...`,
+        );
+        pm = "npm";
+        this.activePackageManager = "npm";
+
+        const fallbackProcess = await container.spawn("npm", [
+          "install",
+          "--no-audit",
+          "--no-fund",
+          "--prefer-offline",
+        ]);
+        this.installProcess = fallbackProcess;
+
+        fallbackProcess.output.pipeTo(
+          new WritableStream({
+            write: (chunk) => {
+              this.appendLog(chunk);
+            },
+          }),
+        );
+
+        exitCode = await fallbackProcess.exit;
+        this.installProcess = null;
+      }
+
       if (exitCode !== 0) {
-        const errorMsg = `npm install failed with exit code ${exitCode}. Check terminal logs.`;
+        const errorMsg = `${pm} install failed with exit code ${exitCode}. Check terminal logs.`;
         this.appendLog(`[Foundry WebContainer] ${errorMsg}`);
         this.updateState({
           status: "error",
@@ -348,7 +450,7 @@ class WebContainerRuntimeManager {
       }
 
       this.appendLog(
-        "[Foundry WebContainer] Dependencies installed successfully.",
+        `[Foundry WebContainer] Dependencies installed successfully via ${pm}.`,
       );
       this.updateState({
         isInstalling: false,
@@ -395,13 +497,14 @@ class WebContainerRuntimeManager {
       this.serverReadyTimer = null;
     }
 
+    const pm = this.activePackageManager;
     this.updateState({
       status: "starting-server",
       isServerRunning: false,
       error: null,
     });
     this.appendLog(
-      "[Foundry WebContainer] Starting Next.js development server (npm run dev)...",
+      `[Foundry WebContainer] Starting Next.js development server (${pm} run dev)...`,
     );
 
     // Guard timeout: If server-ready doesn't fire within 90s, report actionable error
@@ -418,7 +521,7 @@ class WebContainerRuntimeManager {
     }, SERVER_READY_TIMEOUT_MS);
 
     try {
-      const process = await container.spawn("npm", ["run", "dev"]);
+      const process = await container.spawn(pm, ["run", "dev"]);
       this.devProcess = process;
 
       // Stream stdout/stderr
@@ -475,9 +578,10 @@ class WebContainerRuntimeManager {
       return;
     }
 
+    const normalizedFiles = normalizeProjectFiles(updatedFiles);
     let packageJsonChanged = false;
 
-    for (const file of updatedFiles) {
+    for (const file of normalizedFiles) {
       const cleanPath = file.path.replace(/\\/g, "/").replace(/^\/+/, "");
       if (cleanPath === "package.json") {
         packageJsonChanged = true;
@@ -509,7 +613,7 @@ class WebContainerRuntimeManager {
       this.appendLog(
         "[Foundry WebContainer] package.json was modified. Reinstalling dependencies...",
       );
-      const installed = await this.installDependencies(updatedFiles, true);
+      const installed = await this.installDependencies(normalizedFiles, true);
       if (installed) {
         await this.startDevServer();
       }
@@ -531,9 +635,10 @@ class WebContainerRuntimeManager {
     }
 
     try {
+      const normalizedFiles = normalizeProjectFiles(files);
       await this.getWebContainer();
-      await this.mountProjectFiles(files);
-      const installed = await this.installDependencies(files);
+      await this.mountProjectFiles(normalizedFiles);
+      const installed = await this.installDependencies(normalizedFiles);
       if (installed) {
         await this.startDevServer();
       }

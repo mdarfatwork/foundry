@@ -47,10 +47,11 @@ export function getStarterTemplateFiles(
             "tw-animate-css": "^1.4.0",
           },
           devDependencies: {
-            "@tailwindcss/turbopack": "^4",
+            "@tailwindcss/postcss": "^4",
             "@types/node": "^20",
             "@types/react": "^19",
             "@types/react-dom": "^19",
+            postcss: "^8",
             tailwindcss: "^4",
             typescript: "^5",
           },
@@ -98,16 +99,7 @@ export function getStarterTemplateFiles(
       path: "next.config.ts",
       content: `import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
-  },
-};
+const nextConfig: NextConfig = {};
 
 export default nextConfig;
 `,

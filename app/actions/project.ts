@@ -359,7 +359,7 @@ export async function getProjectFilesAction(
         .where(eq(projectFile.projectId, trimmedId))
         .orderBy(projectFile.path);
 
-      // 3. Self-healing path normalization (cleans up any legacy misplaced paths)
+      // 3. Self-healing path & configuration normalization
       const normalizedFiles: ProjectFileRecord[] = [];
       for (const f of files) {
         let normalizedPath = f.path.replace(/\\/g, "/").trim();
@@ -371,12 +371,48 @@ export async function getProjectFilesAction(
           normalizedPath = normalizedPath.replace(/^config\//, "");
         }
 
-        if (normalizedPath !== f.path) {
+        let normalizedContent = f.content;
+        if (normalizedPath === "package.json") {
+          try {
+            const parsed = JSON.parse(f.content);
+            let pkgModified = false;
+            if (!parsed.devDependencies) parsed.devDependencies = {};
+            if (
+              !parsed.devDependencies["@tailwindcss/postcss"] &&
+              !parsed.dependencies?.["@tailwindcss/postcss"]
+            ) {
+              parsed.devDependencies["@tailwindcss/postcss"] = "^4";
+              pkgModified = true;
+            }
+            if (
+              !parsed.devDependencies["postcss"] &&
+              !parsed.dependencies?.["postcss"]
+            ) {
+              parsed.devDependencies["postcss"] = "^8";
+              pkgModified = true;
+            }
+            if (pkgModified) {
+              normalizedContent = JSON.stringify(parsed, null, 2);
+            }
+          } catch {
+            // Ignore malformed JSON
+          }
+        }
+
+        if (normalizedPath !== f.path || normalizedContent !== f.content) {
           await db
             .update(projectFile)
-            .set({ path: normalizedPath, updatedAt: new Date() })
+            .set({
+              path: normalizedPath,
+              content: normalizedContent,
+              updatedAt: new Date(),
+            })
             .where(eq(projectFile.id, f.id));
-          normalizedFiles.push({ ...f, path: normalizedPath });
+          normalizedFiles.push({
+            ...f,
+            path: normalizedPath,
+            content: normalizedContent,
+          });
         } else {
           normalizedFiles.push(f);
         }
