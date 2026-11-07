@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildFileSystemTree } from "@/lib/webcontainer/tree";
+import { isLocalOrPrivateHost } from "@/lib/webcontainer/runtime-manager";
 import type { DirectoryNode, FileNode } from "@webcontainer/api";
 
 describe("WebContainer FileSystemTree Builder", () => {
@@ -96,5 +97,34 @@ describe("WebContainer FileSystemTree Builder", () => {
 
     const tree = buildFileSystemTree(files);
     expect(Object.keys(tree)).toEqual(["valid.txt"]);
+  });
+});
+
+describe("WebContainer Host Environment Detection", () => {
+  it("identifies localhost and loopback hosts as local environments", () => {
+    expect(isLocalOrPrivateHost("localhost")).toBe(true);
+    expect(isLocalOrPrivateHost("127.0.0.1")).toBe(true);
+    expect(isLocalOrPrivateHost("[::1]")).toBe(true);
+    expect(isLocalOrPrivateHost("0.0.0.0")).toBe(true);
+    expect(isLocalOrPrivateHost("app.localhost")).toBe(true);
+    expect(isLocalOrPrivateHost("my-site.local")).toBe(true);
+  });
+
+  it("identifies RFC 1918 private IPv4 network ranges as local environments", () => {
+    expect(isLocalOrPrivateHost("192.168.1.5")).toBe(true);
+    expect(isLocalOrPrivateHost("10.0.0.1")).toBe(true);
+    expect(isLocalOrPrivateHost("172.16.0.1")).toBe(true);
+    expect(isLocalOrPrivateHost("172.31.255.255")).toBe(true);
+  });
+
+  it("identifies public production domains as non-local", () => {
+    expect(isLocalOrPrivateHost("foundry.vercel.app")).toBe(false);
+    expect(isLocalOrPrivateHost("example.com")).toBe(false);
+    expect(isLocalOrPrivateHost("buildfoundry.ai")).toBe(false);
+    expect(isLocalOrPrivateHost("172.32.0.1")).toBe(false);
+  });
+
+  it("handles empty or falsy host inputs safely", () => {
+    expect(isLocalOrPrivateHost("")).toBe(false);
   });
 });

@@ -20,6 +20,39 @@ import type {
 const MAX_LOG_LINES = 250;
 const SERVER_READY_TIMEOUT_MS = 90_000;
 
+/**
+ * Identifies whether a hostname represents a local development or private network environment.
+ * StackBlitz WebContainers do not require an API key on localhost or private networks.
+ * Passing a domain-locked commercial API key on localhost triggers a referrer rejection error.
+ */
+export function isLocalOrPrivateHost(hostname: string): boolean {
+  if (!hostname) return false;
+
+  const normalized = hostname.trim().toLowerCase();
+
+  if (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "[::1]" ||
+    normalized === "0.0.0.0" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local")
+  ) {
+    return true;
+  }
+
+  // IPv4 Private Network Ranges (RFC 1918)
+  if (
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized) ||
+    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(normalized) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 class WebContainerRuntimeManager {
   private instance: WebContainer | null = null;
   private bootPromise: Promise<WebContainer> | null = null;
@@ -120,15 +153,25 @@ class WebContainerRuntimeManager {
     this.bootPromise = (async () => {
       try {
         const apiKey = process.env.NEXT_PUBLIC_WEBCONTAINER_API_KEY?.trim();
-        if (apiKey) {
+        const hostname =
+          typeof window !== "undefined" ? window.location.hostname : "";
+        const isLocal = isLocalOrPrivateHost(hostname);
+        const forceKey =
+          process.env.NEXT_PUBLIC_WEBCONTAINER_FORCE_KEY === "true";
+
+        if (apiKey && (!isLocal || forceKey)) {
           try {
             configureAPIKey(apiKey);
             this.appendLog(
-              "[Foundry WebContainer] WebContainer client key configured.",
+              "[Foundry WebContainer] WebContainer client key configured for production domain.",
             );
           } catch {
             // Ignore if already configured
           }
+        } else if (isLocal) {
+          this.appendLog(
+            "[Foundry WebContainer] Running in local environment; using standard WebContainer runtime.",
+          );
         }
 
         const container = await WebContainer.boot({
@@ -183,6 +226,17 @@ class WebContainerRuntimeManager {
           err instanceof Error
             ? err.message
             : "Failed to boot in-browser WebContainer.";
+
+        if (msg.toLowerCase().includes("referrer")) {
+          const origin =
+            typeof window !== "undefined"
+              ? window.location.origin
+              : "current origin";
+          this.appendLog(
+            `[Foundry WebContainer Diagnostic] Referrer check failed for origin "${origin}". StackBlitz WebContainer API keys restrict allowed domains. For local development, remove NEXT_PUBLIC_WEBCONTAINER_API_KEY from .env.local. For production, add "${origin}" to allowed origins in your StackBlitz Developer Console.`,
+          );
+        }
+
         this.appendLog(`[Foundry WebContainer Boot Failure] ${msg}`);
         this.updateState({ status: "error", error: msg });
         throw err;
