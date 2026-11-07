@@ -85,6 +85,7 @@ export function WorkspaceCanvas({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const terminalLogsEndRef = useRef<HTMLDivElement>(null);
   const hasInitializedRef = useRef(false);
+  const prevSlugRef = useRef<string>(slug);
 
   // WebContainer browser runtime controller
   const {
@@ -127,17 +128,18 @@ export function WorkspaceCanvas({
     }
   }, [logs, showTerminal]);
 
-  // Initialize WebContainer runtime once files are ready
+  // Initialize WebContainer runtime once files are ready or when project changes
   useEffect(() => {
     if (
-      !hasInitializedRef.current &&
+      (!hasInitializedRef.current || prevSlugRef.current !== slug) &&
       normalizedFiles.length > 0 &&
       isSupported
     ) {
       hasInitializedRef.current = true;
+      prevSlugRef.current = slug;
       startWorkspace(normalizedFiles);
     }
-  }, [normalizedFiles, startWorkspace, isSupported]);
+  }, [slug, normalizedFiles, startWorkspace, isSupported]);
 
   // Sync files incrementally when AI updates them without restarting runtime
   const previousFilesRef = useRef<string>("");

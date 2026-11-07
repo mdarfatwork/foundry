@@ -373,22 +373,27 @@ export function WorkspaceChatSidebar({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync external prompt prefill during render (e.g. from Canvas "Ask Foundry to Fix")
+  // Adjust local input value during render when external prompt arrives from Canvas (React 19 pattern)
   const [prevPrefill, setPrevPrefill] = useState<string | null>(null);
   if (externalPromptPrefill && externalPromptPrefill !== prevPrefill) {
     setPrevPrefill(externalPromptPrefill);
     setInputValue(externalPromptPrefill);
-    onClearExternalPrompt?.();
   }
 
-  // Focus textarea when external prompt prefill arrives
+  // Focus textarea and clear parent prefill prop after paint
   useEffect(() => {
-    if (externalPromptPrefill && textareaRef.current) {
-      textareaRef.current.focus();
-      textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = `${Math.min(Math.max(textareaRef.current.scrollHeight, 48), 140)}px`;
+    if (externalPromptPrefill) {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = `${Math.min(
+          Math.max(textareaRef.current.scrollHeight, 48),
+          140,
+        )}px`;
+      }
+      onClearExternalPrompt?.();
     }
-  }, [externalPromptPrefill]);
+  }, [externalPromptPrefill, onClearExternalPrompt]);
 
   // Map incoming persistent messages to local state
   const [messages, setMessages] = useState<readonly LocalMessage[]>(() => {

@@ -112,6 +112,7 @@ class WebContainerRuntimeManager {
   private activePackageManager: "pnpm" | "npm" = "pnpm";
   private listeners: Set<WebContainerListener> = new Set();
   private serverReadyTimer: ReturnType<typeof setTimeout> | null = null;
+  private hasAttachedListeners = false;
 
   private state: WebContainerState = {
     status: "idle",
@@ -175,6 +176,44 @@ class WebContainerRuntimeManager {
       : false;
   }
 
+  private attachListeners(container: WebContainer): void {
+    if (this.hasAttachedListeners) return;
+    this.hasAttachedListeners = true;
+
+    // Register global server-ready listener
+    container.on("server-ready", (port, url) => {
+      this.appendLog(
+        `[Foundry WebContainer] Server ready at ${url} (port ${port})`,
+      );
+      if (this.serverReadyTimer) {
+        clearTimeout(this.serverReadyTimer);
+        this.serverReadyTimer = null;
+      }
+      this.updateState({
+        status: "ready",
+        previewUrl: url,
+        port,
+        isServerRunning: true,
+        error: null,
+      });
+    });
+
+    // Register port open/close events
+    container.on("port", (port, type, url) => {
+      if (type === "open") {
+        this.appendLog(`[Foundry WebContainer] Port ${port} opened at ${url}`);
+      } else {
+        this.appendLog(`[Foundry WebContainer] Port ${port} closed.`);
+      }
+    });
+
+    // Register internal error events
+    container.on("error", ({ message }) => {
+      this.appendLog(`[Foundry WebContainer ERROR] ${message}`);
+      this.updateState({ error: message });
+    });
+  }
+
   /**
    * Initializes and boots the singleton WebContainer instance.
    * Ensures only ONE instance is ever booted across the browser session.
@@ -182,6 +221,20 @@ class WebContainerRuntimeManager {
   public async getWebContainer(): Promise<WebContainer> {
     if (this.instance) {
       return this.instance;
+    }
+
+    // 1. Recover existing instance from WebContainer module static if already booted
+    const livingInstance = (
+      WebContainer as unknown as { _instance?: WebContainer | null }
+    )._instance;
+    if (livingInstance) {
+      this.instance = livingInstance;
+      this.attachListeners(livingInstance);
+      this.appendLog(
+        "[Foundry WebContainer] Connected to active in-browser runtime.",
+      );
+      this.updateState({ status: "idle", error: null });
+      return livingInstance;
     }
 
     if (this.bootPromise) {
@@ -232,41 +285,7 @@ class WebContainerRuntimeManager {
         });
 
         this.instance = container;
-
-        // Register global server-ready listener
-        container.on("server-ready", (port, url) => {
-          this.appendLog(
-            `[Foundry WebContainer] Server ready at ${url} (port ${port})`,
-          );
-          if (this.serverReadyTimer) {
-            clearTimeout(this.serverReadyTimer);
-            this.serverReadyTimer = null;
-          }
-          this.updateState({
-            status: "ready",
-            previewUrl: url,
-            port,
-            isServerRunning: true,
-            error: null,
-          });
-        });
-
-        // Register port open/close events
-        container.on("port", (port, type, url) => {
-          if (type === "open") {
-            this.appendLog(
-              `[Foundry WebContainer] Port ${port} opened at ${url}`,
-            );
-          } else {
-            this.appendLog(`[Foundry WebContainer] Port ${port} closed.`);
-          }
-        });
-
-        // Register internal error events
-        container.on("error", ({ message }) => {
-          this.appendLog(`[Foundry WebContainer ERROR] ${message}`);
-          this.updateState({ error: message });
-        });
+        this.attachListeners(container);
 
         this.appendLog(
           "[Foundry WebContainer] Browser runtime successfully booted.",
@@ -278,6 +297,23 @@ class WebContainerRuntimeManager {
           err instanceof Error
             ? err.message
             : "Failed to boot in-browser WebContainer.";
+
+        // If WebContainer reports it is already booted, recover the living instance!
+        const existingAfterError = (
+          WebContainer as unknown as { _instance?: WebContainer | null }
+        )._instance;
+        if (
+          existingAfterError &&
+          msg.includes("Only a single WebContainer instance can be booted")
+        ) {
+          this.appendLog(
+            "[Foundry WebContainer] Reconnected to living in-browser WebContainer runtime.",
+          );
+          this.instance = existingAfterError;
+          this.attachListeners(existingAfterError);
+          this.updateState({ status: "idle", error: null });
+          return existingAfterError;
+        }
 
         if (msg.toLowerCase().includes("referrer")) {
           const origin =
@@ -686,6 +722,7 @@ class WebContainerRuntimeManager {
       this.installProcess = null;
     }
 
+    this.hasAttachedListeners = false;
     if (this.instance) {
       try {
         this.instance.teardown();
@@ -708,5 +745,12 @@ class WebContainerRuntimeManager {
   }
 }
 
-// Global browser singleton
-export const runtimeManager = new WebContainerRuntimeManager();
+const globalForWebContainer = globalThis as unknown as {
+  __foundry_runtime_manager__?: WebContainerRuntimeManager;
+};
+
+// Global browser singleton (persisted on globalThis to prevent instance destruction across HMR)
+export const runtimeManager =
+  globalForWebContainer.__foundry_runtime_manager__ ??
+  (globalForWebContainer.__foundry_runtime_manager__ =
+    new WebContainerRuntimeManager());
