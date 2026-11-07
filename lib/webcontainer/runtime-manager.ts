@@ -89,6 +89,18 @@ export function normalizeProjectFiles(
       modified = true;
     }
 
+    // Ensure Next.js is pinned to stable 15.3.9 to prevent in-browser WebContainer
+    // invariant errors (Invariant: Expected workStore to be initialized in Next 16)
+    if (
+      parsed.dependencies?.["next"] &&
+      (parsed.dependencies["next"].startsWith("16.") ||
+        parsed.dependencies["next"].startsWith("^16") ||
+        parsed.dependencies["next"] === "16.4.3")
+    ) {
+      parsed.dependencies["next"] = "15.3.9";
+      modified = true;
+    }
+
     if (modified) {
       const nextFiles = [...files];
       nextFiles[pkgIndex] = {

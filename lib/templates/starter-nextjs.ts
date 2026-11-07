@@ -40,7 +40,7 @@ export function getStarterTemplateFiles(
             cn: "^0.5.0",
             "lucide-react": "^1.62.0",
             motion: "^12.0.0",
-            next: "16.4.3",
+            next: "15.3.9",
             "next-themes": "^0.4.6",
             react: "19.3.0",
             "react-dom": "19.3.0",

@@ -151,6 +151,24 @@ describe("WebContainer normalizeProjectFiles Helper", () => {
     expect(parsed.devDependencies["@tailwindcss/postcss"]).toBe("^4");
     expect(parsed.devDependencies["postcss"]).toBe("^8");
     expect(parsed.devDependencies["tailwindcss"]).toBe("^4");
+    expect(parsed.dependencies["next"]).toBe("15.3.9");
+  });
+
+  it("normalizes unstable Next.js 16 to stable Next.js 15.3.9 in dependencies", () => {
+    const rawFiles = [
+      {
+        path: "package.json",
+        content: JSON.stringify({
+          name: "demo",
+          dependencies: { next: "^16.0.0" },
+        }),
+      },
+    ];
+
+    const normalized = normalizeProjectFiles(rawFiles);
+    const parsed = JSON.parse(normalized[0].content);
+
+    expect(parsed.dependencies["next"]).toBe("15.3.9");
   });
 
   it("does not overwrite @tailwindcss/postcss if already present in dependencies or devDependencies", () => {

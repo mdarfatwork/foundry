@@ -391,6 +391,15 @@ export async function getProjectFilesAction(
               parsed.devDependencies["postcss"] = "^8";
               pkgModified = true;
             }
+            if (
+              parsed.dependencies?.["next"] &&
+              (parsed.dependencies["next"].startsWith("16.") ||
+                parsed.dependencies["next"].startsWith("^16") ||
+                parsed.dependencies["next"] === "16.4.3")
+            ) {
+              parsed.dependencies["next"] = "15.3.9";
+              pkgModified = true;
+            }
             if (pkgModified) {
               normalizedContent = JSON.stringify(parsed, null, 2);
             }

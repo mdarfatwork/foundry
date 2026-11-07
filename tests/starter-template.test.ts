@@ -55,7 +55,7 @@ describe("Starter Template Generator", () => {
 
     const parsed = JSON.parse(pkgFile!.content);
     expect(parsed.name).toBe("my-awesome-project");
-    expect(parsed.dependencies["next"]).toBe("16.4.3");
+    expect(parsed.dependencies["next"]).toBe("15.3.9");
     expect(parsed.dependencies["react"]).toBe("19.3.0");
     expect(parsed.dependencies["@base-ui/react"]).toBe("^1.9.0");
     expect(parsed.devDependencies["@tailwindcss/postcss"]).toBeDefined();

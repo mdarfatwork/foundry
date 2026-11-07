@@ -41,7 +41,7 @@ function buildUnifiedSystemPrompt(
   const referencesSection = formatReferencesForPrompt(references);
 
   return `You are Foundry's expert full-stack Next.js, React 19, and Tailwind CSS AI engineer.
-Your task is to generate the user's requested single-page landing website inside an existing Next.js 16 + Tailwind CSS v4 project.
+Your task is to generate the user's requested single-page landing website inside an existing Next.js + Tailwind CSS v4 project.
 
 ### Project Architecture & Established File Structure:
 - Root-level configuration files are ALREADY configured and fixed:
