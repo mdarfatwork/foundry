@@ -1,6 +1,6 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { requireUser, type AuthUser } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import {
@@ -79,12 +79,18 @@ async function executeGeneration(
 
   // 2. Concurrency Control: Prevent concurrent generations from corrupting project state
   if (proj.generationStatus === "generating") {
-    return {
-      success: false,
-      code: "CONCURRENT_GENERATION",
-      error:
-        "A generation is already in progress for this project. Please wait for it to complete.",
-    };
+    const isStale =
+      proj.updatedAt &&
+      Date.now() - new Date(proj.updatedAt).getTime() > 120_000;
+
+    if (!isStale) {
+      return {
+        success: false,
+        code: "CONCURRENT_GENERATION",
+        error:
+          "A generation is already in progress for this project. Please wait for it to complete.",
+      };
+    }
   }
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -130,8 +136,10 @@ async function executeGeneration(
     }
   }
 
-  // 4. Load Current Project Files to Provide Context to NVIDIA
+  // 4. Load Current Project Files & Conversation History for Context
   let existingFiles: FileModification[] = [];
+  let previousMessages: Array<{ role: "user" | "assistant"; content: string }> =
+    [];
   if (process.env.DATABASE_URL) {
     try {
       const rows = await db
@@ -140,9 +148,33 @@ async function executeGeneration(
         .where(eq(projectFile.projectId, trimmedId));
 
       existingFiles = rows;
+
+      const messageRows = await db
+        .select({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+        })
+        .from(message)
+        .where(eq(message.projectId, trimmedId))
+        .orderBy(desc(message.createdAt))
+        .limit(8);
+
+      messageRows.reverse();
+
+      // Exclude the current user message just inserted so it is not duplicated in previousMessages
+      previousMessages = messageRows
+        .filter(
+          (m) =>
+            m.id !== userMsgId && (m.role === "user" || m.role === "assistant"),
+        )
+        .map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }));
     } catch (err) {
       console.error(
-        "[Foundry Generation] Failed to load existing files for context:",
+        "[Foundry Generation] Failed to load existing files or context:",
         err,
       );
     }
@@ -152,6 +184,7 @@ async function executeGeneration(
   const aiResult = await generateWebsite({
     prompt: trimmedPrompt,
     existingFiles,
+    previousMessages,
     references: options?.references,
     provider: options?.provider,
     model: options?.model,
@@ -408,12 +441,18 @@ export async function generateProjectCodeAction(
 
   // 2. Concurrency Control
   if (proj.generationStatus === "generating") {
-    return {
-      success: false,
-      code: "CONCURRENT_GENERATION",
-      error:
-        "A generation is already in progress for this project. Please wait for it to complete.",
-    };
+    const isStale =
+      proj.updatedAt &&
+      Date.now() - new Date(proj.updatedAt).getTime() > 120_000;
+
+    if (!isStale) {
+      return {
+        success: false,
+        code: "CONCURRENT_GENERATION",
+        error:
+          "A generation is already in progress for this project. Please wait for it to complete.",
+      };
+    }
   }
 
   // 3. Check if Clarification is requested and necessary

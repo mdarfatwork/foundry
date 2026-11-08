@@ -1,16 +1,21 @@
 /**
  * Type definitions for Foundry's WebContainer browser runtime.
- * Adheres strictly to AGENTS.md §1, §5.1, §5.2, §5.3, and Prompt §3, §9, §10.
+ * Adheres strictly to AGENTS.md §1, §5.1, §5.2, §5.3, and Prompt §3, §4, §5, §8.
  */
 
 export type WebContainerStatus =
   | "idle"
-  | "unsupported"
   | "booting"
   | "mounting"
   | "installing"
-  | "starting-server"
+  | "starting"
   | "ready"
+  | "recovering"
+  | "failed"
+  | "stopped"
+  | "unsupported"
+  // Legacy aliases supported for full backward compatibility
+  | "starting-server"
   | "error";
 
 export type WebContainerState = {
@@ -22,6 +27,9 @@ export type WebContainerState = {
   readonly isServerRunning: boolean;
   readonly isInstalling: boolean;
   readonly lastInstalledPackageJsonHash: string | null;
+  readonly runtimeSessionId: string | null;
+  readonly operationId: string | null;
+  readonly packageManager: "npm" | "pnpm";
 };
 
 export type FileEntry = {

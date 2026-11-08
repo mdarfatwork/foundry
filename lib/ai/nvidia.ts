@@ -11,7 +11,7 @@ import type {
 import { formatReferencesForPrompt } from "./references";
 
 /**
- * Server-only NVIDIA Hosted Inference API Provider for Foundry.
+ * Server-only NVIDIA Inference API Provider & Structured JSON Parsing Engine for Foundry.
  * Implements resilient chat completions, reasoning model parsing, timeout handling,
  * adaptive clarification question assessment, and structured JSON extraction for z-ai/glm-5.3-flash.
  * Adheres strictly to AGENTS.md §1, §5.1, §5.2, and Prompt §4, §5, §6.
@@ -30,83 +30,375 @@ const MAX_CLARIFICATION_TOKENS = 800;
 export type { GenerateWebsiteOptions } from "./types";
 
 /**
+ * Resiliently extracts files and metadata from model outputs where JSON is malformed
+ * due to unescaped quotes, unescaped newlines, or control characters inside "content".
+ */
+export function extractFilesFromMalformedJson(rawText: string): {
+  readonly summary?: string;
+  readonly details?: readonly string[];
+  readonly files: readonly FileModification[];
+} {
+  const files: FileModification[] = [];
+
+  // 1. Extract summary if present
+  let summary: string | undefined;
+  const summaryMatch = /"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/i.exec(rawText);
+  if (summaryMatch && summaryMatch[1]) {
+    try {
+      summary = JSON.parse(`"${summaryMatch[1]}"`);
+    } catch {
+      summary = summaryMatch[1].replace(/\\"/g, '"');
+    }
+  }
+
+  // 2. Extract details array if present
+  let details: string[] | undefined;
+  const detailsMatch = /"details"\s*:\s*\[([\s\S]*?)\]/i.exec(rawText);
+  if (detailsMatch && detailsMatch[1]) {
+    const itemRegex = /"((?:[^"\\]|\\.)*)"/g;
+    const items: string[] = [];
+    let itemMatch;
+    while ((itemMatch = itemRegex.exec(detailsMatch[1])) !== null) {
+      try {
+        items.push(JSON.parse(`"${itemMatch[1]}"`));
+      } catch {
+        items.push(itemMatch[1].replace(/\\"/g, '"'));
+      }
+    }
+    if (items.length > 0) {
+      details = items;
+    }
+  }
+
+  // 3. Extract { "path": "...", "content": "..." } file entries
+  const pathRegex = /"path"\s*:\s*"([^"]+)"/g;
+  let pathMatch;
+
+  while ((pathMatch = pathRegex.exec(rawText)) !== null) {
+    const filePath = pathMatch[1].trim();
+    const afterIndex = pathMatch.index + pathMatch[0].length;
+
+    // Look for "content": after this path
+    const contentKeyRegex = /"content"\s*:\s*/g;
+    contentKeyRegex.lastIndex = afterIndex;
+    const contentKeyMatch = contentKeyRegex.exec(rawText);
+
+    if (!contentKeyMatch) continue;
+
+    let contentStart = contentKeyMatch.index + contentKeyMatch[0].length;
+
+    // Advance past opening quote or code fence if present
+    if (rawText[contentStart] === '"') {
+      contentStart++;
+    } else if (rawText.startsWith("```", contentStart)) {
+      const fenceNewline = rawText.indexOf("\n", contentStart);
+      if (fenceNewline !== -1) {
+        contentStart = fenceNewline + 1;
+      }
+    }
+
+    // Determine the ending boundary for this file's content
+    let contentEnd = rawText.length;
+
+    // Look for next file entry
+    const nextPathRegex = /,\s*\{\s*"path"\s*:/g;
+    nextPathRegex.lastIndex = contentStart;
+    const nextPathMatch = nextPathRegex.exec(rawText);
+
+    if (nextPathMatch) {
+      contentEnd = nextPathMatch.index;
+      const chunk = rawText.slice(contentStart, contentEnd);
+      const lastQuote = chunk.lastIndexOf('"');
+      if (lastQuote !== -1 && lastQuote > chunk.length - 30) {
+        contentEnd = contentStart + lastQuote;
+      }
+    } else {
+      // Find the closing boundary of files array or outer JSON
+      const trailingEndRegex = /(?:"\s*\}\s*\]|"\s*\}|\}\s*\]\s*\}|\n```)/g;
+      trailingEndRegex.lastIndex = contentStart;
+      let lastMatch: RegExpExecArray | null = null;
+      let m: RegExpExecArray | null;
+      while ((m = trailingEndRegex.exec(rawText)) !== null) {
+        lastMatch = m;
+      }
+      if (lastMatch && lastMatch.index > contentStart) {
+        contentEnd = lastMatch.index;
+      }
+    }
+
+    let rawCode = rawText.slice(contentStart, contentEnd);
+
+    // Strip trailing JSON boilerplate and markdown code fences
+    rawCode = rawCode.replace(/```\s*$/, "");
+    rawCode = rawCode.replace(/"\s*\}\s*\]\s*\}?\s*$/, "");
+    rawCode = rawCode.replace(/"\s*\}\s*$/, "");
+    rawCode = rawCode.replace(/"\s*$/, "");
+
+    // Unescape escaped characters if present
+    if (rawCode.includes("\\n") || rawCode.includes('\\"')) {
+      rawCode = rawCode
+        .replace(/\\r\\n/g, "\n")
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, "\\");
+    }
+
+    const trimmedCode = rawCode.trim();
+    if (trimmedCode.length > 20) {
+      files.push({
+        path: filePath,
+        content: trimmedCode,
+      });
+    }
+  }
+
+  // 4. Also check if the model provided a dictionary map: "app/page.tsx": "..."
+  if (files.length === 0) {
+    const dictRegex = /"((?:app|components|lib)\/[^"]+)"\s*:\s*"/g;
+    let dictMatch;
+    while ((dictMatch = dictRegex.exec(rawText)) !== null) {
+      const filePath = dictMatch[1].trim();
+      const contentStart = dictMatch.index + dictMatch[0].length;
+      let contentEnd = rawText.length;
+
+      const nextKeyRegex = /",\s*"(?:app|components|lib)\//g;
+      nextKeyRegex.lastIndex = contentStart;
+      const nextKeyMatch = nextKeyRegex.exec(rawText);
+      if (nextKeyMatch) {
+        contentEnd = nextKeyMatch.index;
+      } else {
+        const trailingBrace = rawText.lastIndexOf("}");
+        if (trailingBrace > contentStart) {
+          contentEnd = trailingBrace;
+        }
+      }
+
+      let rawCode = rawText.slice(contentStart, contentEnd);
+      rawCode = rawCode.replace(/"\s*\}?\s*$/, "");
+      if (rawCode.includes("\\n") || rawCode.includes('\\"')) {
+        rawCode = rawCode
+          .replace(/\\r\\n/g, "\n")
+          .replace(/\\n/g, "\n")
+          .replace(/\\t/g, "\t")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, "\\");
+      }
+
+      const trimmedCode = rawCode.trim();
+      if (trimmedCode.length > 20) {
+        files.push({
+          path: filePath,
+          content: trimmedCode,
+        });
+      }
+    }
+  }
+
+  return { summary, details, files };
+}
+
+/**
  * Parses raw model output text and extracts structured JSON.
- * Gracefully handles markdown code fences, embedded JSON blocks, and trailing commentary.
+ * Gracefully handles markdown code fences, embedded JSON blocks, alternative key mappings,
+ * unescaped quotes in JSON string values, raw TSX code fallbacks, and trailing commentary.
  */
 export function extractStructuredOutput(rawText: string): GenerationOutput {
   if (!rawText || typeof rawText !== "string") {
     throw new Error("Model returned empty or non-string response.");
   }
 
-  let text = rawText.trim();
+  const trimmedRaw = rawText.trim();
+  if (!trimmedRaw) {
+    throw new Error("Model returned empty or non-string response.");
+  }
 
-  // 1. Strip markdown code fences if wrapped in ```json ... ``` or ``` ... ```
-  const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
-  const match = jsonBlockRegex.exec(text);
-  if (match && match[1]) {
-    text = match[1].trim();
-  } else {
-    // 2. Locate first '{' and last '}' if model included introductory prose
-    const firstBrace = text.indexOf("{");
-    const lastBrace = text.lastIndexOf("}");
+  let parsed: Record<string, unknown> | null = null;
+  let parseError: Error | null = null;
+
+  // 1. First attempt: Look for explicit ```json { ... } ``` fence
+  const explicitJsonRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i;
+  const jsonFenceMatch = explicitJsonRegex.exec(trimmedRaw);
+  if (jsonFenceMatch && jsonFenceMatch[1]) {
+    try {
+      const res = JSON.parse(jsonFenceMatch[1].trim());
+      if (res && typeof res === "object") {
+        parsed = res as Record<string, unknown>;
+      }
+    } catch (e) {
+      parseError = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  // 2. Second attempt: Find the outermost '{' ... '}' in the text
+  if (!parsed) {
+    const firstBrace = trimmedRaw.indexOf("{");
+    const lastBrace = trimmedRaw.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      text = text.slice(firstBrace, lastBrace + 1);
+      const candidate = trimmedRaw.slice(firstBrace, lastBrace + 1).trim();
+      try {
+        const res = JSON.parse(candidate);
+        if (res && typeof res === "object") {
+          parsed = res as Record<string, unknown>;
+        }
+      } catch (e) {
+        if (!parseError) {
+          parseError = e instanceof Error ? e : new Error(String(e));
+        }
+      }
     }
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new Error(
-      `Failed to parse model output as JSON: ${err instanceof Error ? err.message : "Syntax error"}`,
-    );
+  // 3. Third attempt: Try parsing raw text directly if it wasn't matched above
+  if (!parsed && trimmedRaw.startsWith("{") && trimmedRaw.endsWith("}")) {
+    try {
+      const res = JSON.parse(trimmedRaw);
+      if (res && typeof res === "object") {
+        parsed = res as Record<string, unknown>;
+      }
+    } catch (e) {
+      if (!parseError) {
+        parseError = e instanceof Error ? e : new Error(String(e));
+      }
+    }
   }
 
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("Parsed JSON must be an object.");
-  }
-
-  const record = parsed as Record<string, unknown>;
-
-  const summary =
-    typeof record.summary === "string" && record.summary.trim()
-      ? record.summary.trim()
-      : "Updated project files according to your instructions.";
-
+  let summary = "Updated project files according to your instructions.";
   let details: string[] = [];
-  if (Array.isArray(record.details)) {
-    details = record.details
-      .filter(
-        (item): item is string =>
-          typeof item === "string" && item.trim().length > 0,
-      )
-      .map((item) => item.trim());
-  }
-
-  if (!Array.isArray(record.files) || record.files.length === 0) {
-    throw new Error(
-      'JSON output must contain a non-empty "files" array with { path, content } objects.',
-    );
-  }
-
   const files: FileModification[] = [];
-  for (const f of record.files) {
-    if (!f || typeof f !== "object") {
-      throw new Error("Invalid file entry in generated files list.");
-    }
-    const fileObj = f as Record<string, unknown>;
-    if (typeof fileObj.path !== "string" || !fileObj.path.trim()) {
-      throw new Error("Each generated file must have a non-empty string path.");
-    }
-    if (typeof fileObj.content !== "string") {
-      throw new Error(`File "${fileObj.path}" must have string content.`);
+
+  if (parsed) {
+    if (typeof parsed.summary === "string" && parsed.summary.trim()) {
+      summary = parsed.summary.trim();
     }
 
-    files.push({
-      path: fileObj.path.trim(),
-      content: fileObj.content,
-    });
+    if (Array.isArray(parsed.details)) {
+      details = parsed.details
+        .filter(
+          (item): item is string =>
+            typeof item === "string" && item.trim().length > 0,
+        )
+        .map((item) => item.trim());
+    }
+
+    // Extract files from parsed object
+    // Case A: parsed.files is an array of { path, content }
+    if (Array.isArray(parsed.files)) {
+      for (const f of parsed.files) {
+        if (!f || typeof f !== "object") continue;
+        const fileObj = f as Record<string, unknown>;
+        if (
+          typeof fileObj.path === "string" &&
+          fileObj.path.trim() &&
+          typeof fileObj.content === "string"
+        ) {
+          files.push({
+            path: fileObj.path.trim(),
+            content: fileObj.content,
+          });
+        }
+      }
+    }
+    // Case B: parsed.files is a dictionary mapping { "app/page.tsx": "content" } or a single file object
+    else if (parsed.files && typeof parsed.files === "object") {
+      const fileRecord = parsed.files as Record<string, unknown>;
+      if (
+        typeof fileRecord.path === "string" &&
+        fileRecord.path.trim() &&
+        typeof fileRecord.content === "string"
+      ) {
+        files.push({
+          path: fileRecord.path.trim(),
+          content: fileRecord.content,
+        });
+      } else {
+        for (const [filePath, fileContent] of Object.entries(fileRecord)) {
+          if (typeof fileContent === "string" && fileContent.trim()) {
+            files.push({
+              path: filePath.trim(),
+              content: fileContent,
+            });
+          }
+        }
+      }
+    }
+
+    // Case C: Single file in parsed.code / parsed.page / parsed.content
+    if (files.length === 0) {
+      if (typeof parsed.code === "string" && parsed.code.trim()) {
+        files.push({
+          path: "app/page.tsx",
+          content: parsed.code.trim(),
+        });
+      } else if (typeof parsed.page === "string" && parsed.page.trim()) {
+        files.push({
+          path: "app/page.tsx",
+          content: parsed.page.trim(),
+        });
+      } else if (
+        typeof parsed.content === "string" &&
+        parsed.content.trim() &&
+        (parsed.content.includes("export default") ||
+          parsed.content.includes("function") ||
+          parsed.content.includes("import "))
+      ) {
+        const targetPath =
+          typeof parsed.path === "string" && parsed.path.trim()
+            ? parsed.path.trim()
+            : "app/page.tsx";
+        files.push({
+          path: targetPath,
+          content: parsed.content,
+        });
+      }
+    }
+  }
+
+  // 4. Fallback: If no files could be parsed from standard JSON, run malformed JSON recovery
+  // Recovers from unescaped quotes in JSX strings (e.g. className="...") that cause JSON.parse to fail
+  if (files.length === 0) {
+    const recovered = extractFilesFromMalformedJson(trimmedRaw);
+    if (recovered.files.length > 0) {
+      files.push(...recovered.files);
+      if (!parsed) {
+        if (recovered.summary) summary = recovered.summary;
+        if (recovered.details && recovered.details.length > 0) {
+          details = [...recovered.details];
+        }
+      }
+    }
+  }
+
+  // 5. Fallback: If still no files found, check for raw markdown code blocks in rawText
+  if (files.length === 0) {
+    const codeBlockRegex =
+      /```(?:tsx|jsx|typescript|javascript|react)?\s*([\s\S]*?(?:export\s+default|function\s+[A-Z]|return\s*\()[\s\S]*?)\s*```/i;
+    const codeMatch = codeBlockRegex.exec(trimmedRaw);
+    if (codeMatch && codeMatch[1]) {
+      const extractedCode = codeMatch[1].trim();
+      if (extractedCode.length > 50) {
+        files.push({
+          path: "app/page.tsx",
+          content: extractedCode,
+        });
+        if (!parsed) {
+          summary = "Updated app/page.tsx with your requested changes.";
+          details = ["Extracted updated page component."];
+        }
+      }
+    }
+  }
+
+  // 6. If still no files found, throw clear, descriptive errors
+  if (files.length === 0) {
+    if (parsed) {
+      throw new Error(
+        'JSON output must contain a non-empty "files" array with { path, content } objects.',
+      );
+    }
+    throw new Error(
+      `Failed to parse model output as JSON: ${parseError ? parseError.message : "Syntax error"}`,
+    );
   }
 
   return {
@@ -376,8 +668,13 @@ function buildSystemPrompt(
   const existingFileList = existingFiles.map((f) => `- ${f.path}`).join("\n");
   const referencesSection = formatReferencesForPrompt(references);
 
+  const currentPageFile = existingFiles.find((f) => f.path === "app/page.tsx");
+  const currentPageSnippet = currentPageFile?.content?.trim()
+    ? `\n### Current app/page.tsx Source (Review for edits, tweaks, or bug fixes):\n\`\`\`tsx\n${currentPageFile.content.slice(0, 9000)}\n\`\`\`\n`
+    : "";
+
   return `You are Foundry's expert full-stack Next.js, React 19, and Tailwind CSS AI engineer.
-Your task is to generate the user's requested single-page landing website inside an existing Next.js 16 + Tailwind CSS v4 project.
+Your task is to generate or edit the user's requested single-page website inside an existing Next.js + Tailwind CSS v4 project.
 
 ### Project Architecture & Established File Structure:
 - Root-level configuration files are ALREADY configured and fixed:
@@ -400,6 +697,7 @@ Your task is to generate the user's requested single-page landing website inside
 
 ### Existing Project Files in Repository:
 ${existingFileList}
+${currentPageSnippet}
 ${referencesSection ? `\n${referencesSection}\n` : ""}
 ### Free Photography Sourcing (Unsplash):
 When the landing page benefits from visual imagery (hero visual, feature cards, showcase, team, testimonials):
@@ -412,18 +710,31 @@ When the landing page benefits from visual imagery (hero visual, feature cards, 
 - Apply responsive aspect ratio classes (e.g. aspect-video, aspect-square), object-cover, and loading="lazy" for below-the-fold images.
 - Do NOT embed large base64 images into TSX code.
 
-### Strict Generation Scope:
-1. Generate a complete, polished, production-ready "app/page.tsx" containing all requested sections (Hero, Features, Showcase, Testimonials, CTA, Footer).
+### Strict Generation & Bug-Fixing Scope:
+1. Generate or update a complete, polished, production-ready "app/page.tsx" containing all requested sections.
 2. Reuse the existing shadcn/ui components (@/components/ui/button, @/components/ui/card, @/components/ui/badge) and @/lib/utils (cn).
 3. Do NOT generate unnecessary configuration files or invent fake folders like "config/".
 4. Keep mock data items concise (e.g. 3 featured cards/properties, 2-3 testimonials/services) so the entire page is clean, modular, and completes reliably within token limits.
 5. Never truncate code with comments like "// ...rest of code". Provide 100% complete TypeScript TSX code.
 6. app/page.tsx MUST include "export default function Page() { ... }" or "export default function HomePage() { ... }".
 
+### Critical Rules for Follow-Ups, Edits, and Bug Fixes:
+- If the user asks to fix an issue, repair a bug, make an edit, or follow up on a previous request (e.g. "fix the issue in that", "make the hero darker", "fix the error"):
+  - Inspect the current "app/page.tsx" source code provided above.
+  - Fix any syntax errors, invalid imports, hydration errors, or layout issues.
+  - Return the FULL, updated "app/page.tsx" in the "files" array.
+  - You MUST ALWAYS respond with a valid JSON object matching the schema below.
+  - NEVER respond with plain conversational text alone without the "files" array.
+
 ### Strict JSON Output Schema:
-You MUST reply with ONLY a single, valid JSON object.
+You MUST reply with ONLY a single, valid RFC 8259 JSON object.
+CRITICAL JSON FORMATTING REQUIREMENT:
+- The JSON response must be 100% syntactically valid JSON parseable by JSON.parse().
+- Inside the "content" string value, all double quotes MUST be properly escaped as \\" (e.g. className=\\"...\\").
+- Newlines inside the "content" string MUST be escaped as \\n.
+- Never write raw unescaped quotes or raw control characters inside the "content" string.
 {
-  "summary": "1-2 sentence description of what was designed and generated.",
+  "summary": "1-2 sentence description of what was designed, fixed, or updated.",
   "details": [
     "Key visual layout or hero section created",
     "Feature architecture or components highlighted",

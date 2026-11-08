@@ -5,6 +5,9 @@
  */
 
 export const STARTER_TEMPLATE_ID = "nextjs-shadcn-v1";
+export const STARTER_NEXT_VERSION = "15.3.9";
+export const STARTER_REACT_VERSION = "19.3.0";
+export const STARTER_BASE_UI_VERSION = "^1.9.0";
 
 export type TemplateFile = {
   readonly path: string;
@@ -29,7 +32,7 @@ export function getStarterTemplateFiles(
           version: "0.1.0",
           private: true,
           scripts: {
-            dev: "next dev --webpack",
+            dev: "next dev",
             build: "next build",
             start: "next start",
             lint: "eslint",

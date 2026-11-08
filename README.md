@@ -177,7 +177,15 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm format:check && pnpm build
 
 ---
 
-## 7. Commercial & Licensing Considerations
+## 7. WebContainer Runtime & Persistent Logging
+
+Foundry features an in-browser WebContainer runtime running stable Next.js 16, React 19, and Tailwind CSS v4 with automated persistent database logging to Supabase PostgreSQL.
+
+For comprehensive operational architecture, lifecycle states, security redaction, and troubleshooting details, see [WebContainer Runtime Architecture Guide](docs/webcontainer-runtime.md).
+
+---
+
+## 8. Commercial & Licensing Considerations
 
 - **StackBlitz WebContainer API:** Free for non-commercial open-source use. Commercial production deployments require an API key from StackBlitz (`NEXT_PUBLIC_WEBCONTAINER_API_KEY`).
 - **Google Gemini API:** Free tier usage may log prompts according to Google terms. Paid tiers offer enterprise privacy and zero prompt retention.

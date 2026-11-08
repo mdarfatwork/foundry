@@ -40,8 +40,13 @@ function buildUnifiedSystemPrompt(
   const existingFileList = existingFiles.map((f) => `- ${f.path}`).join("\n");
   const referencesSection = formatReferencesForPrompt(references);
 
+  const currentPageFile = existingFiles.find((f) => f.path === "app/page.tsx");
+  const currentPageSnippet = currentPageFile?.content?.trim()
+    ? `\n### Current app/page.tsx Source (Review for edits, tweaks, or bug fixes):\n\`\`\`tsx\n${currentPageFile.content.slice(0, 9000)}\n\`\`\`\n`
+    : "";
+
   return `You are Foundry's expert full-stack Next.js, React 19, and Tailwind CSS AI engineer.
-Your task is to generate the user's requested single-page landing website inside an existing Next.js + Tailwind CSS v4 project.
+Your task is to generate or edit the user's requested single-page website inside an existing Next.js + Tailwind CSS v4 project.
 
 ### Project Architecture & Established File Structure:
 - Root-level configuration files are ALREADY configured and fixed:
@@ -64,6 +69,7 @@ Your task is to generate the user's requested single-page landing website inside
 
 ### Existing Project Files in Repository:
 ${existingFileList}
+${currentPageSnippet}
 ${referencesSection ? `\n${referencesSection}\n` : ""}
 ### Free Photography Sourcing (Unsplash):
 When the landing page benefits from visual imagery (hero visual, feature cards, showcase, team, testimonials):
@@ -76,18 +82,31 @@ When the landing page benefits from visual imagery (hero visual, feature cards, 
 - Apply responsive aspect ratio classes (e.g. aspect-video, aspect-square), object-cover, and loading="lazy" for below-the-fold images.
 - Do NOT embed large base64 images into TSX code.
 
-### Strict Generation Scope:
-1. Generate a complete, polished, production-ready "app/page.tsx" containing all requested sections (Hero, Features, Showcase, Testimonials, CTA, Footer).
+### Strict Generation & Bug-Fixing Scope:
+1. Generate or update a complete, polished, production-ready "app/page.tsx" containing all requested sections.
 2. Reuse the existing shadcn/ui components (@/components/ui/button, @/components/ui/card, @/components/ui/badge) and @/lib/utils (cn).
 3. Do NOT generate unnecessary configuration files or invent fake folders like "config/".
 4. Keep mock data items concise (e.g. 3 featured cards/properties, 2-3 testimonials/services) so the entire page is clean, modular, and completes reliably within token limits.
 5. Never truncate code with comments like "// ...rest of code". Provide 100% complete TypeScript TSX code.
 6. app/page.tsx MUST include "export default function Page() { ... }" or "export default function HomePage() { ... }".
 
+### Critical Rules for Follow-Ups, Edits, and Bug Fixes:
+- If the user asks to fix an issue, repair a bug, make an edit, or follow up on a previous request (e.g. "fix the issue in that", "make the hero darker", "fix the error"):
+  - Inspect the current "app/page.tsx" source code provided above.
+  - Fix any syntax errors, invalid imports, hydration errors, or layout issues.
+  - Return the FULL, updated "app/page.tsx" in the "files" array.
+  - You MUST ALWAYS respond with a valid JSON object matching the schema below.
+  - NEVER respond with plain conversational text alone without the "files" array.
+
 ### Strict JSON Output Schema:
-You MUST reply with ONLY a single, valid JSON object.
+You MUST reply with ONLY a single, valid RFC 8259 JSON object.
+CRITICAL JSON FORMATTING REQUIREMENT:
+- The JSON response must be 100% syntactically valid JSON parseable by JSON.parse().
+- Inside the "content" string value, all double quotes MUST be properly escaped as \\" (e.g. className=\\"...\\").
+- Newlines inside the "content" string MUST be escaped as \\n.
+- Never write raw unescaped quotes or raw control characters inside the "content" string.
 {
-  "summary": "1-2 sentence description of what was designed and generated.",
+  "summary": "1-2 sentence description of what was designed, fixed, or updated.",
   "details": [
     "Key visual layout or hero section created",
     "Feature architecture or components highlighted",
@@ -275,10 +294,19 @@ export async function generateWebsite(
       options.references,
     );
 
+    const messages: Array<{ role: "user" | "assistant"; content: string }> = [
+      ...(options.previousMessages ?? []).map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })),
+      { role: "user", content: options.prompt },
+    ];
+
     const { text, usage } = await generateText({
       model,
       system: systemPrompt,
-      prompt: options.prompt,
+      messages,
+      temperature: 0.2,
       abortSignal: AbortSignal.timeout(timeoutMs),
     });
 
@@ -312,6 +340,26 @@ export async function generateWebsite(
   } catch (err) {
     const errorMsg =
       err instanceof Error ? redactSecrets(err.message) : "Unknown AI error.";
+
+    if (
+      /api key not valid/i.test(errorMsg) ||
+      /invalid api key/i.test(errorMsg) ||
+      /api_key_invalid/i.test(errorMsg)
+    ) {
+      const envVarName =
+        provider === "google"
+          ? "GOOGLE_GENERATIVE_AI_API_KEY"
+          : provider === "openrouter"
+            ? "OPENROUTER_API_KEY"
+            : "NVIDIA_API_KEY";
+      return {
+        success: false,
+        code: "CONFIG_ERROR",
+        provider,
+        model: config.modelId,
+        error: `Invalid API key for ${provider.toUpperCase()}. Please check ${envVarName} in your .env.local file.`,
+      };
+    }
 
     if (errorMsg.includes("429") || /rate[- ]limit/i.test(errorMsg)) {
       return {

@@ -139,7 +139,7 @@ describe("WebContainer normalizeProjectFiles Helper", () => {
         path: "package.json",
         content: JSON.stringify({
           name: "demo",
-          dependencies: { next: "16.4.3" },
+          dependencies: { next: "15.3.9" },
           devDependencies: { tailwindcss: "^4" },
         }),
       },
@@ -154,13 +154,30 @@ describe("WebContainer normalizeProjectFiles Helper", () => {
     expect(parsed.dependencies["next"]).toBe("15.3.9");
   });
 
-  it("normalizes unstable Next.js 16 to stable Next.js 15.3.9 in dependencies", () => {
+  it("normalizes Next.js 16 to WebContainer-compatible 15.3.9 to prevent workStore invariant crash", () => {
     const rawFiles = [
       {
         path: "package.json",
         content: JSON.stringify({
           name: "demo",
-          dependencies: { next: "^16.0.0" },
+          dependencies: { next: "16.4.5" },
+        }),
+      },
+    ];
+
+    const normalized = normalizeProjectFiles(rawFiles);
+    const parsed = JSON.parse(normalized[0].content);
+
+    expect(parsed.dependencies["next"]).toBe("15.3.9");
+  });
+
+  it("preserves stable Next.js 15.3.9 in dependencies", () => {
+    const rawFiles = [
+      {
+        path: "package.json",
+        content: JSON.stringify({
+          name: "demo",
+          dependencies: { next: "15.3.9" },
         }),
       },
     ];

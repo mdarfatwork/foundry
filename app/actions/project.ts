@@ -391,14 +391,29 @@ export async function getProjectFilesAction(
               parsed.devDependencies["postcss"] = "^8";
               pkgModified = true;
             }
+            const currentNext =
+              parsed.dependencies?.["next"] || parsed.devDependencies?.["next"];
             if (
-              parsed.dependencies?.["next"] &&
-              (parsed.dependencies["next"].startsWith("16.") ||
-                parsed.dependencies["next"].startsWith("^16") ||
-                parsed.dependencies["next"] === "16.4.3")
+              !currentNext ||
+              typeof currentNext !== "string" ||
+              currentNext.startsWith("16.") ||
+              currentNext.startsWith("^16") ||
+              currentNext.startsWith("~16")
             ) {
+              parsed.dependencies = parsed.dependencies || {};
               parsed.dependencies["next"] = "15.3.9";
+              if (parsed.devDependencies?.["next"]) {
+                delete parsed.devDependencies["next"];
+              }
               pkgModified = true;
+            }
+            if (parsed.scripts?.dev && typeof parsed.scripts.dev === "string") {
+              if (parsed.scripts.dev.includes("--webpack")) {
+                parsed.scripts.dev =
+                  parsed.scripts.dev.replace(/\s*--webpack\b/g, "").trim() ||
+                  "next dev";
+                pkgModified = true;
+              }
             }
             if (pkgModified) {
               normalizedContent = JSON.stringify(parsed, null, 2);

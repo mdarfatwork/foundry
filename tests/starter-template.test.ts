@@ -2,11 +2,17 @@ import { describe, it, expect } from "vitest";
 import {
   getStarterTemplateFiles,
   STARTER_TEMPLATE_ID,
+  STARTER_NEXT_VERSION,
+  STARTER_REACT_VERSION,
+  STARTER_BASE_UI_VERSION,
 } from "@/lib/templates/starter-nextjs";
 
 describe("Starter Template Generator", () => {
-  it("uses the canonical template ID", () => {
+  it("uses the canonical template ID and stable versions", () => {
     expect(STARTER_TEMPLATE_ID).toBe("nextjs-shadcn-v1");
+    expect(STARTER_NEXT_VERSION).toBe("15.3.9");
+    expect(STARTER_REACT_VERSION).toBe("19.3.0");
+    expect(STARTER_BASE_UI_VERSION).toBe("^1.9.0");
   });
 
   it("produces deterministic starter files for a project", () => {
@@ -48,7 +54,7 @@ describe("Starter Template Generator", () => {
     expect(paths).toContain("lib/utils.ts");
   });
 
-  it("generates valid package.json with sanitized project name", () => {
+  it("generates valid package.json with sanitized project name and WebContainer-compatible Next.js 15.3.9", () => {
     const files = getStarterTemplateFiles("My Awesome Project!");
     const pkgFile = files.find((f) => f.path === "package.json");
     expect(pkgFile).toBeDefined();

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   extractStructuredOutput,
   extractClarificationOutput,
+  extractFilesFromMalformedJson,
   assessClarificationWithNvidia,
   generateWebsiteWithNvidia,
 } from "@/lib/ai/nvidia";
@@ -78,7 +79,7 @@ Enjoy building with Foundry!`;
       );
     });
 
-    it("throws error when files array is missing or empty", () => {
+    it("throws error when files array is missing or empty and no fallback code exists", () => {
       const missingFiles = JSON.stringify({
         summary: "Test",
         details: [],
@@ -87,6 +88,125 @@ Enjoy building with Foundry!`;
       expect(() => extractStructuredOutput(missingFiles)).toThrowError(
         /JSON output must contain a non-empty "files" array/,
       );
+    });
+
+    it("recovers files from a dictionary map object in files", () => {
+      const raw = JSON.stringify({
+        summary: "Updated page layout.",
+        files: {
+          "app/page.tsx":
+            "export default function HomePage() { return <div>Home</div>; }",
+        },
+      });
+
+      const result = extractStructuredOutput(raw);
+      expect(result.summary).toBe("Updated page layout.");
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].path).toBe("app/page.tsx");
+      expect(result.files[0].content).toContain(
+        "export default function HomePage",
+      );
+    });
+
+    it("recovers files when model returns code property instead of files array", () => {
+      const raw = JSON.stringify({
+        summary: "Fixed layout issue in page.",
+        code: "export default function FixedPage() { return <h1>Fixed</h1>; }",
+      });
+
+      const result = extractStructuredOutput(raw);
+      expect(result.summary).toBe("Fixed layout issue in page.");
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].path).toBe("app/page.tsx");
+      expect(result.files[0].content).toContain(
+        "export default function FixedPage",
+      );
+    });
+
+    it("recovers files when model returns top-level path and content", () => {
+      const raw = JSON.stringify({
+        path: "app/page.tsx",
+        content:
+          "export default function DirectPage() { return <p>Direct</p>; }",
+      });
+
+      const result = extractStructuredOutput(raw);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].path).toBe("app/page.tsx");
+      expect(result.files[0].content).toContain(
+        "export default function DirectPage",
+      );
+    });
+
+    it("recovers files from raw markdown TSX code block when model omits JSON envelope", () => {
+      const raw = `Here is the fixed file for your landing page:
+\`\`\`tsx
+"use client";
+import { Button } from "@/components/ui/button";
+
+export default function RecoveredPage() {
+  return (
+    <main>
+      <h1>Recovered Real Estate</h1>
+      <Button>Explore</Button>
+    </main>
+  );
+}
+\`\`\`
+I hope this resolves the issue!`;
+
+      const result = extractStructuredOutput(raw);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].path).toBe("app/page.tsx");
+      expect(result.files[0].content).toContain(
+        "export default function RecoveredPage",
+      );
+    });
+
+    it("recovers files from malformed JSON with unescaped quotes inside content string", () => {
+      const malformedJsonWithUnescapedQuotes = `\`\`\`json
+{
+  "summary": "Designed luxury real estate landing page.",
+  "details": ["Hero with property showcase", "Filterable cards"],
+  "files": [
+    {
+      "path": "app/page.tsx",
+      "content": "\"use client\";\\nimport { Button } from "@/components/ui/button";\\nexport default function LuxuryRealEstatePage() { return <div className="text-gold">Luxury Real Estate</div>; }"
+    }
+  ]
+}
+\`\`\``;
+
+      const result = extractStructuredOutput(malformedJsonWithUnescapedQuotes);
+      expect(result.summary).toBe("Designed luxury real estate landing page.");
+      expect(result.details).toHaveLength(2);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].path).toBe("app/page.tsx");
+      expect(result.files[0].content).toContain("Luxury Real Estate");
+      expect(result.files[0].content).toContain('className="text-gold"');
+    });
+
+    it("extracts multiple files from malformed JSON using extractFilesFromMalformedJson directly", () => {
+      const malformedMultiFile = `{
+  "summary": "Multi-file component build",
+  "files": [
+    {
+      "path": "app/page.tsx",
+      "content": "\"use client\";\\nexport default function Page() { return <div id="hero">Hero</div>; }"
+    },
+    {
+      "path": "components/hero.tsx",
+      "content": "export function Hero() { return <header title="main">Header</header>; }"
+    }
+  ]
+}`;
+
+      const recovered = extractFilesFromMalformedJson(malformedMultiFile);
+      expect(recovered.files).toHaveLength(2);
+      expect(recovered.files[0].path).toBe("app/page.tsx");
+      expect(recovered.files[0].content).toContain('id="hero"');
+      expect(recovered.files[1].path).toBe("components/hero.tsx");
+      expect(recovered.files[1].content).toContain('title="main"');
     });
   });
 

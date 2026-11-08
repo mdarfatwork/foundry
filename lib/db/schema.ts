@@ -6,6 +6,7 @@ import {
   boolean,
   index,
   uniqueIndex,
+  integer,
 } from "drizzle-orm/pg-core";
 
 /**
@@ -242,11 +243,55 @@ export const projectVersion = pgTable(
   (table) => [index("project_version_project_id_idx").on(table.projectId)],
 );
 
-// 11. Relational Mappings (Drizzle Relational Queries)
+// 11. Persistent Runtime Logs Table (Diagnostics, WebContainer events, compile/server errors)
+export const runtimeLog = pgTable(
+  "runtime_log",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    runtimeSessionId: text("runtime_session_id").notNull(),
+    operationId: text("operation_id"),
+    level: text("level").notNull(), // "debug" | "info" | "warn" | "error"
+    source: text("source").notNull(), // "webcontainer" | "installer" | "dev-server" | "client" | "backend"
+    eventType: text("event_type").notNull(),
+    message: text("message").notNull(),
+    details: text("details"), // Validated JSON string
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    sequenceNumber: integer("sequence_number").notNull().default(0),
+    processExitCode: integer("process_exit_code"),
+    metadata: text("metadata"), // Safe diagnostic context (JSON string)
+  },
+  (table) => [
+    index("runtime_log_project_occurred_idx").on(
+      table.projectId,
+      table.occurredAt,
+    ),
+    index("runtime_log_project_session_idx").on(
+      table.projectId,
+      table.runtimeSessionId,
+    ),
+    index("runtime_log_session_seq_idx").on(
+      table.runtimeSessionId,
+      table.sequenceNumber,
+    ),
+    index("runtime_log_project_level_idx").on(table.projectId, table.level),
+  ],
+);
+
+// 12. Relational Mappings (Drizzle Relational Queries)
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
   projects: many(project),
+  runtimeLogs: many(runtimeLog),
 }));
 
 export const sessionRelations = relations(session, ({ one }) => ({
@@ -273,6 +318,7 @@ export const projectRelations = relations(project, ({ one, many }) => ({
   messages: many(message),
   generationJobs: many(generationJob),
   versions: many(projectVersion),
+  runtimeLogs: many(runtimeLog),
 }));
 
 export const projectFileRelations = relations(projectFile, ({ one }) => ({
@@ -318,6 +364,17 @@ export const projectVersionRelations = relations(projectVersion, ({ one }) => ({
   }),
 }));
 
+export const runtimeLogRelations = relations(runtimeLog, ({ one }) => ({
+  project: one(project, {
+    fields: [runtimeLog.projectId],
+    references: [project.id],
+  }),
+  user: one(user, {
+    fields: [runtimeLog.userId],
+    references: [user.id],
+  }),
+}));
+
 // Inferred TypeScript Types
 export type User = typeof user.$inferSelect;
 export type NewUser = typeof user.$inferInsert;
@@ -339,3 +396,5 @@ export type GenerationJob = typeof generationJob.$inferSelect;
 export type NewGenerationJob = typeof generationJob.$inferInsert;
 export type ProjectVersion = typeof projectVersion.$inferSelect;
 export type NewProjectVersion = typeof projectVersion.$inferInsert;
+export type RuntimeLog = typeof runtimeLog.$inferSelect;
+export type NewRuntimeLog = typeof runtimeLog.$inferInsert;

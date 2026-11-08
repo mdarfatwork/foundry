@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useWebContainer } from "@/hooks/use-webcontainer";
+import { WorkspaceDiagnosticsPanel } from "./workspace-diagnostics-panel";
 import type { ProjectRecord, ProjectFileRecord } from "@/app/actions/project";
 import { cn } from "@/lib/utils";
 
@@ -76,14 +77,12 @@ export function WorkspaceCanvas({
   const [selectedFilePath, setSelectedFilePath] =
     useState<string>("app/page.tsx");
   const [hasCopiedCode, setHasCopiedCode] = useState(false);
-  const [hasCopiedLogs, setHasCopiedLogs] = useState(false);
   const [isRefreshingIframe, setIsRefreshingIframe] = useState(false);
   const [terminalExplicitState, setTerminalExplicitState] = useState<
     boolean | null
   >(null);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const terminalLogsEndRef = useRef<HTMLDivElement>(null);
   const activeSlugRef = useRef<string | null>(null);
   const previousFilesKeyRef = useRef<string>("");
 
@@ -94,14 +93,16 @@ export function WorkspaceCanvas({
     error: runtimeError,
     logs,
     isSupported,
+    loggerState,
     startWorkspace,
+    recoverWorkspace,
     restartServer,
     syncFiles,
-    reinstallDependencies,
   } = useWebContainer();
 
-  // Derive terminal visibility: explicit user toggle takes precedence; otherwise opens on error
-  const showTerminal = terminalExplicitState ?? status === "error";
+  // Derive terminal visibility: explicit user toggle takes precedence; otherwise opens on error/failure
+  const showTerminal =
+    terminalExplicitState ?? (status === "failed" || status === "error");
 
   // Normalize files list to guarantee valid POSIX relative paths
   const normalizedFiles = useMemo(() => {
@@ -121,13 +122,6 @@ export function WorkspaceCanvas({
     );
   }, [normalizedFiles, selectedFilePath]);
 
-  // Auto-scroll terminal to bottom when new logs arrive
-  useEffect(() => {
-    if (showTerminal && terminalLogsEndRef.current) {
-      terminalLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [logs, showTerminal]);
-
   // Coordinate WebContainer workspace startup and incremental file syncing
   useEffect(() => {
     if (!isSupported || normalizedFiles.length === 0) return;
@@ -140,7 +134,7 @@ export function WorkspaceCanvas({
     if (activeSlugRef.current !== slug) {
       activeSlugRef.current = slug;
       previousFilesKeyRef.current = currentFilesKey;
-      startWorkspace(normalizedFiles);
+      startWorkspace(normalizedFiles, project?.id);
       return;
     }
 
@@ -149,7 +143,14 @@ export function WorkspaceCanvas({
       previousFilesKeyRef.current = currentFilesKey;
       syncFiles(normalizedFiles);
     }
-  }, [slug, normalizedFiles, startWorkspace, syncFiles, isSupported]);
+  }, [
+    slug,
+    normalizedFiles,
+    startWorkspace,
+    syncFiles,
+    isSupported,
+    project?.id,
+  ]);
 
   const handleRefreshIframe = useCallback(() => {
     setIsRefreshingIframe(true);
@@ -166,17 +167,6 @@ export function WorkspaceCanvas({
       await navigator.clipboard.writeText(selectedFile.content);
       setHasCopiedCode(true);
       setTimeout(() => setHasCopiedCode(false), 2000);
-    } catch {
-      // Ignore clipboard error
-    }
-  };
-
-  const handleCopyLogs = async () => {
-    if (logs.length === 0) return;
-    try {
-      await navigator.clipboard.writeText(logs.join("\n"));
-      setHasCopiedLogs(true);
-      setTimeout(() => setHasCopiedLogs(false), 2000);
     } catch {
       // Ignore clipboard error
     }
@@ -670,11 +660,18 @@ export function WorkspaceCanvas({
                         Installing npm
                       </span>
                     </>
-                  ) : status === "starting-server" ? (
+                  ) : status === "starting" || status === "starting-server" ? (
                     <>
                       <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
                       <span className="text-[10px] font-mono text-amber-500 font-medium">
                         Starting Next.js
+                      </span>
+                    </>
+                  ) : status === "recovering" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
+                      <span className="text-[10px] font-mono text-amber-500 font-medium">
+                        Recovering
                       </span>
                     </>
                   ) : status === "ready" ? (
@@ -687,7 +684,7 @@ export function WorkspaceCanvas({
                         Preview Ready
                       </span>
                     </>
-                  ) : status === "error" ? (
+                  ) : status === "failed" || status === "error" ? (
                     <>
                       <span
                         className="h-1.5 w-1.5 rounded-full bg-destructive"
@@ -697,6 +694,10 @@ export function WorkspaceCanvas({
                         Runtime Error
                       </span>
                     </>
+                  ) : status === "stopped" ? (
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      Stopped
+                    </span>
                   ) : status === "unsupported" ? (
                     <>
                       <span
@@ -742,7 +743,7 @@ export function WorkspaceCanvas({
                       COOP: same-origin | COEP: credentialless
                     </p>
                   </div>
-                ) : status === "error" ? (
+                ) : status === "failed" || status === "error" ? (
                   <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 select-text">
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive shadow-2xs">
                       <AlertCircle className="h-6 w-6" />
@@ -759,7 +760,7 @@ export function WorkspaceCanvas({
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => startWorkspace(normalizedFiles)}
+                        onClick={() => recoverWorkspace(normalizedFiles)}
                         className="gap-1.5 text-xs"
                       >
                         <RotateCw className="h-3.5 w-3.5" />
@@ -769,7 +770,7 @@ export function WorkspaceCanvas({
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => reinstallDependencies(normalizedFiles)}
+                        onClick={() => recoverWorkspace(normalizedFiles, true)}
                         className="gap-1.5 text-xs"
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
@@ -789,7 +790,7 @@ export function WorkspaceCanvas({
                     </div>
                   </div>
                 ) : (
-                  /* Loading State (Booting / Installing / Starting Dev Server) */
+                  /* Loading State (Booting / Installing / Starting Dev Server / Recovering) */
                   <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted/50 text-foreground shadow-2xs">
                       <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -802,9 +803,12 @@ export function WorkspaceCanvas({
                             ? "Mounting project files..."
                             : status === "installing"
                               ? "Installing project dependencies with npm..."
-                              : status === "starting-server"
+                              : status === "starting" ||
+                                  status === "starting-server"
                                 ? "Starting Next.js development server..."
-                                : "Preparing live preview..."}
+                                : status === "recovering"
+                                  ? "Recovering workspace and restarting preview..."
+                                  : "Preparing live preview..."}
                       </h3>
                       <p className="text-xs text-muted-foreground leading-relaxed">
                         Executing safely inside your browser using
@@ -824,76 +828,14 @@ export function WorkspaceCanvas({
           </div>
         )}
 
-        {/* 3. Collapsible WebContainer Terminal Drawer */}
+        {/* 3. Collapsible WebContainer Diagnostics & Terminal Drawer */}
         {showTerminal && (
-          <div className="h-52 border-t border-border bg-black/95 text-emerald-400 font-mono text-xs flex flex-col shrink-0 select-text z-20 shadow-lg">
-            {/* Terminal Header */}
-            <div className="h-7 px-3 border-b border-border/40 bg-white/5 flex items-center justify-between shrink-0 text-muted-foreground select-none">
-              <div className="flex items-center gap-2 text-[11px]">
-                <Terminal className="h-3 w-3 text-emerald-400" />
-                <span className="font-semibold text-foreground">
-                  WebContainer Process Output
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  ({logs.length} lines)
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={handleCopyLogs}
-                  className="px-2 py-0.5 rounded text-[10px] hover:bg-white/10 text-muted-foreground hover:text-foreground cursor-pointer flex items-center gap-1"
-                >
-                  {hasCopiedLogs ? (
-                    <>
-                      <Check className="h-3 w-3 text-emerald-400" />
-                      <span>Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3 w-3" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTerminalExplicitState(false)}
-                  className="px-1.5 py-0.5 rounded text-[11px] hover:bg-white/10 text-muted-foreground hover:text-foreground cursor-pointer"
-                  title="Close terminal drawer"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            {/* Terminal Output Stream */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-0.5 font-mono text-[11px] leading-relaxed select-text">
-              {logs.length === 0 ? (
-                <div className="text-muted-foreground italic">
-                  No process output recorded yet.
-                </div>
-              ) : (
-                logs.map((log, idx) => (
-                  <div
-                    key={`${idx}_${log.slice(0, 10)}`}
-                    className={cn(
-                      "whitespace-pre-wrap break-words",
-                      log.includes("ERROR") || log.includes("failed")
-                        ? "text-rose-400"
-                        : log.includes("ready") || log.includes("Synced")
-                          ? "text-emerald-400"
-                          : "text-zinc-300",
-                    )}
-                  >
-                    {log}
-                  </div>
-                ))
-              )}
-              <div ref={terminalLogsEndRef} />
-            </div>
-          </div>
+          <WorkspaceDiagnosticsPanel
+            projectId={project?.id || slug}
+            liveLogs={logs}
+            loggerState={loggerState}
+            onClose={() => setTerminalExplicitState(false)}
+          />
         )}
       </div>
     </section>
