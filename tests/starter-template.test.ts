@@ -10,7 +10,7 @@ import {
 describe("Starter Template Generator", () => {
   it("uses the canonical template ID and stable versions", () => {
     expect(STARTER_TEMPLATE_ID).toBe("nextjs-shadcn-v1");
-    expect(STARTER_NEXT_VERSION).toBe("15.3.9");
+    expect(STARTER_NEXT_VERSION).toBe("16.4.6");
     expect(STARTER_REACT_VERSION).toBe("19.3.0");
     expect(STARTER_BASE_UI_VERSION).toBe("^1.9.0");
   });
@@ -54,18 +54,19 @@ describe("Starter Template Generator", () => {
     expect(paths).toContain("lib/utils.ts");
   });
 
-  it("generates valid package.json with sanitized project name and WebContainer-compatible Next.js 15.3.9", () => {
+  it("generates valid package.json with sanitized project name and Next.js 16.4.6", () => {
     const files = getStarterTemplateFiles("My Awesome Project!");
     const pkgFile = files.find((f) => f.path === "package.json");
     expect(pkgFile).toBeDefined();
 
     const parsed = JSON.parse(pkgFile!.content);
     expect(parsed.name).toBe("my-awesome-project");
-    expect(parsed.dependencies["next"]).toBe("15.3.9");
+    expect(parsed.dependencies["next"]).toBe("16.4.6");
     expect(parsed.dependencies["react"]).toBe("19.3.0");
     expect(parsed.dependencies["@base-ui/react"]).toBe("^1.9.0");
     expect(parsed.devDependencies["@tailwindcss/postcss"]).toBeDefined();
     expect(parsed.devDependencies["postcss"]).toBeDefined();
+    expect(parsed.scripts?.dev).toBe("next dev --webpack");
   });
 
   it("generates valid app/page.tsx with export default component", () => {

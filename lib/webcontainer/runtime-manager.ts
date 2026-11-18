@@ -93,35 +93,39 @@ export function normalizeProjectFiles(
       modified = true;
     }
 
-    // Ensure Next.js is present and pinned to 15.3.9 for WebContainer execution.
-    // Next.js 16 App Router throws InvariantError (workStore uninitialized) in WebContainer
-    // due to WASI AsyncLocalStorage context loss across asynchronous compilation boundaries.
+    // Ensure Next.js is present and targets Next.js 16.4.6 baseline.
     const currentNext =
       parsed.dependencies?.["next"] || parsed.devDependencies?.["next"];
     if (
       !currentNext ||
       typeof currentNext !== "string" ||
-      currentNext.startsWith("16.") ||
-      currentNext.startsWith("^16") ||
-      currentNext.startsWith("~16")
+      currentNext.startsWith("15.")
     ) {
       if (!parsed.dependencies) parsed.dependencies = {};
-      parsed.dependencies["next"] = "15.3.9";
+      parsed.dependencies["next"] = "16.4.6";
       if (parsed.devDependencies?.["next"]) {
         delete parsed.devDependencies["next"];
       }
       modified = true;
     }
 
-    // In Next 15, `--webpack` is an unknown CLI option and causes next dev to exit with code 1.
-    // Ensure scripts.dev uses standard `next dev`.
-    if (parsed.scripts?.dev && typeof parsed.scripts.dev === "string") {
-      if (parsed.scripts.dev.includes("--webpack")) {
-        parsed.scripts.dev =
-          parsed.scripts.dev.replace(/\s*--webpack\b/g, "").trim() ||
-          "next dev";
-        modified = true;
-      }
+    // Ensure typecheck script exists for static verification
+    if (!parsed.scripts?.typecheck) {
+      if (!parsed.scripts) parsed.scripts = {};
+      parsed.scripts.typecheck = "tsc --noEmit";
+      modified = true;
+    }
+
+    // Ensure scripts.dev uses Webpack (`next dev --webpack`)
+    if (!parsed.scripts) {
+      parsed.scripts = {};
+    }
+    if (!parsed.scripts.dev || typeof parsed.scripts.dev !== "string") {
+      parsed.scripts.dev = "next dev --webpack";
+      modified = true;
+    } else if (!parsed.scripts.dev.includes("--webpack")) {
+      parsed.scripts.dev = `${parsed.scripts.dev} --webpack`.trim();
+      modified = true;
     }
 
     if (modified) {
@@ -139,7 +143,20 @@ export function normalizeProjectFiles(
   return files;
 }
 
-class WebContainerRuntimeManager {
+/**
+ * Classifies whether a terminal output chunk or error message corresponds to
+ * the WebContainer WebAssembly Turbopack native-bindings unsupported error.
+ */
+export function isTurbopackUnsupportedError(output: string): boolean {
+  if (!output || typeof output !== "string") return false;
+  return (
+    /turbopack is not supported on this platform/i.test(output) ||
+    /only webassembly \(wasm\) bindings were loaded/i.test(output) ||
+    /turbopack requires native bindings/i.test(output)
+  );
+}
+
+export class WebContainerRuntimeManager {
   private instance: WebContainer | null = null;
   private bootPromise: Promise<WebContainer> | null = null;
   private devProcess: WebContainerProcess | null = null;
@@ -150,6 +167,23 @@ class WebContainerRuntimeManager {
   private installTimer: ReturnType<typeof setTimeout> | null = null;
   private hasAttachedListeners = false;
   private activeProjectId: string | null = null;
+  private startupStartTime = 0;
+  private devServerStartTime = 0;
+  private hasAttemptedWebpackFallback = false;
+  private devServerOutputBuffer = "";
+  private readinessAbortController: AbortController | null = null;
+  private isConfirmingReadiness = false;
+  private candidateUrl: string | null = null;
+  private activePort: number | null = null;
+  private activePreviewUrl: string | null = null;
+  private stageMetrics: {
+    bootDurationMs?: number;
+    mountDurationMs?: number;
+    installDurationMs?: number;
+    installSkipped?: boolean;
+    serverReadyDurationMs?: number;
+    totalStartupDurationMs?: number;
+  } = {};
 
   private state: WebContainerState = {
     status: "idle",
@@ -163,6 +197,7 @@ class WebContainerRuntimeManager {
     runtimeSessionId: null,
     operationId: null,
     packageManager: "npm",
+    stageMetrics: null,
   };
 
   public getState(): WebContainerState {
@@ -254,25 +289,15 @@ class WebContainerRuntimeManager {
     // Register global server-ready listener
     container.on("server-ready", (port, url) => {
       this.appendLog(
-        `[Foundry WebContainer] Server ready at ${url} (port ${port})`,
+        `[Foundry WebContainer] Server ready signal received at ${url} (port ${port}). Verifying preview readiness...`,
         {
           level: "info",
           source: "dev-server",
-          eventType: "server_ready",
+          eventType: "server_ready_signal",
           details: { port, url },
         },
       );
-      if (this.serverReadyTimer) {
-        clearTimeout(this.serverReadyTimer);
-        this.serverReadyTimer = null;
-      }
-      this.updateState({
-        status: "ready",
-        previewUrl: url,
-        port,
-        isServerRunning: true,
-        error: null,
-      });
+      void this.verifyAndConfirmServerReadiness(container, port, url);
     });
 
     // Register port open/close events
@@ -284,6 +309,7 @@ class WebContainerRuntimeManager {
           eventType: "port_open",
           details: { port, url },
         });
+        void this.verifyAndConfirmServerReadiness(container, port, url);
       } else {
         this.appendLog(`[Foundry WebContainer] Port ${port} closed.`, {
           level: "info",
@@ -291,6 +317,26 @@ class WebContainerRuntimeManager {
           eventType: "port_close",
           details: { port },
         });
+        if (this.state.port === port || this.activePort === port) {
+          this.activePort = null;
+          this.activePreviewUrl = null;
+          if (
+            this.state.status === "ready" ||
+            this.state.status === "waiting-ready"
+          ) {
+            if (this.readinessAbortController) {
+              this.readinessAbortController.abort();
+              this.readinessAbortController = null;
+            }
+            this.updateState({
+              status: "failed",
+              isServerRunning: false,
+              previewUrl: null,
+              port: null,
+              error: `Port ${port} closed unexpectedly. The development server process has stopped.`,
+            });
+          }
+        }
       }
     });
 
@@ -568,17 +614,31 @@ class WebContainerRuntimeManager {
     const packageJsonFile = normalizedFiles.find(
       (f) => f.path === "package.json",
     );
-    const currentHash = packageJsonFile
-      ? this.hashContent(packageJsonFile.content)
-      : "no-pkg";
+    const lockFile = normalizedFiles.find(
+      (f) => f.path === "package-lock.json" || f.path === "pnpm-lock.yaml",
+    );
+    const contentToHash = `${packageJsonFile?.content ?? ""}|${lockFile?.content ?? ""}`;
+    const currentHash = this.hashContent(contentToHash);
 
-    // Skip installation if already installed with same package.json content
+    // Verify whether node_modules actually exists in the container filesystem
+    let hasNodeModules = false;
+    try {
+      const entries = await container.fs.readdir("node_modules");
+      hasNodeModules = entries.length > 0;
+    } catch {
+      hasNodeModules = false;
+    }
+
+    // Skip installation ONLY if not forced, node_modules actually exists on disk, and hash matches
     if (
       !forceInstall &&
+      hasNodeModules &&
       this.state.lastInstalledPackageJsonHash === currentHash
     ) {
+      this.stageMetrics.installSkipped = true;
+      this.stageMetrics.installDurationMs = 0;
       this.appendLog(
-        `[Foundry WebContainer] Dependencies up to date. Skipping ${this.activePackageManager} install.`,
+        `[Foundry WebContainer] Dependencies verified on virtual disk. Skipping ${this.activePackageManager} install.`,
         {
           level: "debug",
           source: "installer",
@@ -728,12 +788,224 @@ class WebContainerRuntimeManager {
   }
 
   /**
+   * Ensures that package.json scripts.dev in the WebContainer virtual filesystem
+   * is configured to use Webpack (`next dev --webpack`) for Next.js 16 WebAssembly compatibility.
+   */
+  private async ensureWebpackInVirtualFileSystem(
+    container: WebContainer,
+  ): Promise<void> {
+    try {
+      const rawPkg = await container.fs.readFile("package.json", "utf-8");
+      const parsed = JSON.parse(rawPkg);
+      let modified = false;
+
+      if (!parsed.scripts) {
+        parsed.scripts = {};
+      }
+
+      if (!parsed.scripts.dev || typeof parsed.scripts.dev !== "string") {
+        parsed.scripts.dev = "next dev --webpack";
+        modified = true;
+      } else if (!parsed.scripts.dev.includes("--webpack")) {
+        parsed.scripts.dev = `${parsed.scripts.dev} --webpack`.trim();
+        modified = true;
+      }
+
+      if (modified) {
+        await container.fs.writeFile(
+          "package.json",
+          JSON.stringify(parsed, null, 2),
+        );
+        this.appendLog(
+          "[Foundry WebContainer] Configured package.json scripts.dev with Webpack (`next dev --webpack`).",
+          {
+            level: "debug",
+            source: "dev-server",
+            eventType: "dev_script_configured_webpack",
+          },
+        );
+      }
+    } catch {
+      // Ignore if virtual filesystem package.json read/parse fails
+    }
+  }
+
+  /**
+   * Verifies that the development server is actually alive and reachable.
+   * A port-open event alone is insufficient because processes may exit immediately after opening a port.
+   */
+  private async verifyAndConfirmServerReadiness(
+    container: WebContainer,
+    port: number,
+    url: string,
+  ): Promise<void> {
+    if (this.state.status === "ready" && this.state.previewUrl === url) {
+      return;
+    }
+
+    if (this.isConfirmingReadiness && this.candidateUrl === url) {
+      return;
+    }
+
+    this.isConfirmingReadiness = true;
+    this.candidateUrl = url;
+
+    // Abort any prior in-flight readiness verification
+    if (this.readinessAbortController) {
+      this.readinessAbortController.abort();
+    }
+    const abortController = new AbortController();
+    this.readinessAbortController = abortController;
+    const { signal } = abortController;
+
+    this.updateState({
+      status: "waiting-ready",
+      port,
+      operationId: "confirm-readiness",
+    });
+
+    this.appendLog(
+      `[Foundry WebContainer] Port ${port} opened at ${url}. Waiting for development server readiness...`,
+      {
+        level: "info",
+        source: "dev-server",
+        eventType: "waiting_readiness",
+        details: { port, url },
+      },
+    );
+
+    const startTime = Date.now();
+    const maxWaitMs = 12_000;
+    let isReady = false;
+
+    try {
+      while (!signal.aborted && Date.now() - startTime < maxWaitMs) {
+        // If the dev process already terminated or crashed, abort immediately
+        if (
+          !this.devProcess ||
+          this.state.status === "crashed" ||
+          this.state.status === "failed"
+        ) {
+          return;
+        }
+
+        try {
+          if (typeof fetch !== "undefined") {
+            const res = await Promise.race([
+              fetch(url, { mode: "no-cors", cache: "no-store", signal }),
+              new Promise<null>((_, reject) =>
+                setTimeout(() => reject(new Error("Probe timeout")), 1200),
+              ),
+            ]);
+            if (res) {
+              isReady = true;
+              break;
+            }
+          } else {
+            // Mock / non-browser test environment
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            if (this.devProcess) {
+              isReady = true;
+              break;
+            }
+          }
+        } catch {
+          // Probe timed out or failed to connect yet; continue polling
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+
+      if (signal.aborted) {
+        return;
+      }
+
+      // Check again if dev process died before readiness could be confirmed
+      if (!this.devProcess || !isReady) {
+        if (!this.devProcess) {
+          this.appendLog(
+            `[Foundry WebContainer Error] Development server process exited before readiness could be confirmed.`,
+            {
+              level: "error",
+              source: "dev-server",
+              eventType: "early_termination_before_ready",
+              details: { port, url },
+            },
+          );
+          this.updateState({
+            status: "crashed",
+            isServerRunning: false,
+            previewUrl: null,
+            port: null,
+            error:
+              "Development server exited prematurely before preview was ready.",
+          });
+        }
+        return;
+      }
+
+      if (this.serverReadyTimer) {
+        clearTimeout(this.serverReadyTimer);
+        this.serverReadyTimer = null;
+      }
+
+      this.activePort = port;
+      this.activePreviewUrl = url;
+
+      if (this.devServerStartTime > 0) {
+        const now =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        this.stageMetrics.serverReadyDurationMs = Math.round(
+          now - this.devServerStartTime,
+        );
+        this.stageMetrics.totalStartupDurationMs = Math.round(
+          now - this.startupStartTime,
+        );
+
+        this.appendLog(
+          `[Foundry WebContainer Performance] Lifecycle stage durations: Boot: ${this.stageMetrics.bootDurationMs ?? 0}ms | Mount: ${this.stageMetrics.mountDurationMs ?? 0}ms | Install: ${this.stageMetrics.installDurationMs ?? 0}ms (${this.stageMetrics.installSkipped ? "cached" : "ran"}) | Server Ready: ${this.stageMetrics.serverReadyDurationMs ?? 0}ms | Total: ${this.stageMetrics.totalStartupDurationMs ?? 0}ms`,
+          {
+            level: "info",
+            source: "webcontainer",
+            eventType: "runtime_stage_metrics",
+            details: { ...this.stageMetrics },
+          },
+        );
+      }
+
+      this.appendLog(
+        `[Foundry WebContainer] Development server is ready and serving preview at ${url} (port ${port}).`,
+        {
+          level: "info",
+          source: "dev-server",
+          eventType: "server_ready",
+          details: { port, url },
+        },
+      );
+
+      this.updateState({
+        status: "ready",
+        previewUrl: url,
+        port,
+        isServerRunning: true,
+        error: null,
+        stageMetrics: {
+          ...this.stageMetrics,
+          measuredAt: Date.now(),
+        },
+      });
+    } finally {
+      this.isConfirmingReadiness = false;
+    }
+  }
+
+  /**
    * Starts or restarts the Next.js development server.
    */
   public async startDevServer(): Promise<void> {
     const container = await this.getWebContainer();
 
-    // If a dev server process is already running, kill it first
+    // 1. Clean up previous dev server process if running, and wait for exit to prevent port collision
     if (this.devProcess) {
       this.appendLog(
         "[Foundry WebContainer] Stopping previous dev server process...",
@@ -743,12 +1015,22 @@ class WebContainerRuntimeManager {
           eventType: "dev_server_terminate_previous",
         },
       );
+      const prevProcess = this.devProcess;
+      this.devProcess = null;
       try {
-        this.devProcess.kill();
+        prevProcess.kill();
+        await Promise.race([
+          prevProcess.exit,
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
       } catch {
         // Ignore kill errors
       }
-      this.devProcess = null;
+    }
+
+    if (this.readinessAbortController) {
+      this.readinessAbortController.abort();
+      this.readinessAbortController = null;
     }
 
     if (this.serverReadyTimer) {
@@ -756,11 +1038,20 @@ class WebContainerRuntimeManager {
       this.serverReadyTimer = null;
     }
 
+    this.devServerOutputBuffer = "";
+
+    // 2. Ensure package.json scripts.dev uses Webpack (`next dev --webpack`)
+    await this.ensureWebpackInVirtualFileSystem(container);
+
     const pm = this.activePackageManager;
+    this.devServerStartTime =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
     this.updateState({
       status: "starting",
       isServerRunning: false,
       error: null,
+      previewUrl: null,
+      port: null,
       operationId: "start-server",
     });
     this.appendLog(
@@ -776,7 +1067,10 @@ class WebContainerRuntimeManager {
 
     // Guard timeout: If server-ready doesn't fire within 90s, report actionable error
     this.serverReadyTimer = setTimeout(() => {
-      if (this.state.status === "starting") {
+      if (
+        this.state.status === "starting" ||
+        this.state.status === "waiting-ready"
+      ) {
         const timeoutMsg =
           "Development server took longer than 90 seconds to respond. Check terminal logs for compile errors or retry.";
         this.appendLog(`[Foundry WebContainer Timeout] ${timeoutMsg}`, {
@@ -788,6 +1082,7 @@ class WebContainerRuntimeManager {
         this.updateState({
           status: "failed",
           error: timeoutMsg,
+          isServerRunning: false,
         });
       }
     }, SERVER_READY_TIMEOUT_MS);
@@ -796,25 +1091,55 @@ class WebContainerRuntimeManager {
       const process = await container.spawn(pm, ["run", "dev"]);
       this.devProcess = process;
 
-      // Stream stdout/stderr
+      // Stream stdout/stderr and maintain output buffer for diagnostic classification
       process.output.pipeTo(
         new WritableStream({
           write: (chunk) => {
-            const isErr =
+            this.devServerOutputBuffer = (
+              this.devServerOutputBuffer + chunk
+            ).slice(-8192);
+
+            const isCompileError =
+              /failed to compile/i.test(chunk) ||
+              /syntaxerror/i.test(chunk) ||
+              /unhandled runtime error/i.test(chunk) ||
+              /module not found/i.test(chunk) ||
+              /cannot find module/i.test(chunk);
+            const isWarningOrNotice =
               chunk.toLowerCase().includes("error") ||
               chunk.toLowerCase().includes("failed");
+
+            const level = isCompileError
+              ? "error"
+              : isWarningOrNotice
+                ? "warn"
+                : "info";
+
+            const eventType = isCompileError
+              ? "dev_server_compile_error"
+              : isWarningOrNotice
+                ? "dev_server_warning"
+                : "dev_server_output";
+
             this.appendLog(chunk, {
-              level: isErr ? "warn" : "info",
+              level,
               source: "dev-server",
-              eventType: "dev_server_output",
+              eventType,
               operationId: "start-server",
             });
+
+            if (isCompileError) {
+              this.updateState({
+                error: chunk.trim(),
+                status: "failed",
+              });
+            }
           },
         }),
       );
 
       // Handle premature server exit
-      process.exit.then((exitCode) => {
+      process.exit.then(async (exitCode) => {
         if (this.devProcess === process) {
           this.devProcess = null;
           this.appendLog(
@@ -827,14 +1152,58 @@ class WebContainerRuntimeManager {
               details: { exitCode },
             },
           );
-          if (exitCode !== 0 && this.state.status !== "ready") {
+
+          if (exitCode !== 0) {
+            // Check if this was the specific Turbopack native bindings failure
+            if (
+              isTurbopackUnsupportedError(this.devServerOutputBuffer) &&
+              !this.hasAttemptedWebpackFallback
+            ) {
+              this.hasAttemptedWebpackFallback = true;
+              this.appendLog(
+                "[Foundry WebContainer Compatibility Fallback] Turbopack native bindings are unsupported in the WebAssembly sandbox. Retrying development server once using Webpack (`next dev --webpack`)...",
+                {
+                  level: "warn",
+                  source: "dev-server",
+                  eventType: "turbopack_fallback_attempt",
+                  details: { exitCode },
+                },
+              );
+
+              // Update package.json scripts.dev in virtual filesystem
+              await this.ensureWebpackInVirtualFileSystem(container);
+
+              // Retry startDevServer
+              await this.startDevServer();
+              return;
+            }
+
+            const isTurbopack = isTurbopackUnsupportedError(
+              this.devServerOutputBuffer,
+            );
+            const errorMsg = isTurbopack
+              ? "Turbopack is not supported in the in-browser WebContainer sandbox. WebContainers require Webpack ('next dev --webpack')."
+              : `Next.js development server exited with code ${exitCode}. Check terminal logs for compile or runtime errors.`;
+
+            if (this.readinessAbortController) {
+              this.readinessAbortController.abort();
+              this.readinessAbortController = null;
+            }
+
             this.updateState({
-              status: "failed",
+              status: "crashed",
               isServerRunning: false,
-              error: `Next.js development server exited with code ${exitCode}.`,
+              previewUrl: null,
+              port: null,
+              error: errorMsg,
             });
           } else {
-            this.updateState({ isServerRunning: false });
+            this.updateState({
+              status: "stopped",
+              isServerRunning: false,
+              previewUrl: null,
+              port: null,
+            });
           }
         }
       });
@@ -951,11 +1320,38 @@ class WebContainerRuntimeManager {
       return;
     }
 
+    this.startupStartTime =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    this.stageMetrics = {};
+    this.hasAttemptedWebpackFallback = false;
+
     try {
       const normalizedFiles = normalizeProjectFiles(files);
+      const bootStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       await this.getWebContainer();
+      const bootEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      this.stageMetrics.bootDurationMs = Math.round(bootEnd - bootStart);
+
+      const mountStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       await this.mountProjectFiles(normalizedFiles);
+      const mountEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      this.stageMetrics.mountDurationMs = Math.round(mountEnd - mountStart);
+
+      const installStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       const installed = await this.installDependencies(normalizedFiles);
+      const installEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (!this.stageMetrics.installSkipped) {
+        this.stageMetrics.installDurationMs = Math.round(
+          installEnd - installStart,
+        );
+      }
+
       if (installed) {
         await this.startDevServer();
       }
@@ -1003,14 +1399,41 @@ class WebContainerRuntimeManager {
       this.devProcess = null;
     }
 
+    this.startupStartTime =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    this.stageMetrics = {};
+    this.hasAttemptedWebpackFallback = false;
+
     try {
       const normalizedFiles = normalizeProjectFiles(files);
+      const bootStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       await this.getWebContainer();
+      const bootEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      this.stageMetrics.bootDurationMs = Math.round(bootEnd - bootStart);
+
+      const mountStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       await this.mountProjectFiles(normalizedFiles);
+      const mountEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      this.stageMetrics.mountDurationMs = Math.round(mountEnd - mountStart);
+
+      const installStart =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       const installed = await this.installDependencies(
         normalizedFiles,
         forceInstall,
       );
+      const installEnd =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (!this.stageMetrics.installSkipped) {
+        this.stageMetrics.installDurationMs = Math.round(
+          installEnd - installStart,
+        );
+      }
+
       if (installed) {
         await this.startDevServer();
       }
@@ -1039,6 +1462,7 @@ class WebContainerRuntimeManager {
         eventType: "restart_requested",
       },
     );
+    this.hasAttemptedWebpackFallback = false;
     await this.startDevServer();
   }
 
@@ -1046,6 +1470,11 @@ class WebContainerRuntimeManager {
    * Teardown action when user leaves the workspace completely.
    */
   public teardown(): void {
+    if (this.readinessAbortController) {
+      this.readinessAbortController.abort();
+      this.readinessAbortController = null;
+    }
+
     if (this.serverReadyTimer) {
       clearTimeout(this.serverReadyTimer);
       this.serverReadyTimer = null;
@@ -1075,6 +1504,13 @@ class WebContainerRuntimeManager {
     }
 
     this.hasAttachedListeners = false;
+    this.isConfirmingReadiness = false;
+    this.candidateUrl = null;
+    this.activePort = null;
+    this.activePreviewUrl = null;
+    this.hasAttemptedWebpackFallback = false;
+    this.devServerOutputBuffer = "";
+
     if (this.instance) {
       try {
         this.instance.teardown();

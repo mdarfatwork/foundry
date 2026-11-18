@@ -9,6 +9,7 @@ import {
   generationJob,
   message,
   projectVersion,
+  runtimeLog,
 } from "@/lib/db/schema";
 import { getProjectByIdForUser, type ActionResponse } from "./project";
 import { generateWebsite, assessClarification } from "@/lib/ai/unified";
@@ -218,6 +219,26 @@ async function executeGeneration(
           role: "assistant",
           content: `I couldn't complete that generation request: ${aiResult.error.replace(/\.+$/, "")}. Your previous project files were preserved.`,
         });
+
+        await db.insert(runtimeLog).values({
+          id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          projectId: trimmedId,
+          userId: user.id,
+          runtimeSessionId: jobId,
+          operationId: "generation",
+          level: "error",
+          source: "backend",
+          eventType: "generation_failure",
+          message: `Generation failed: ${aiResult.error}`,
+          details: JSON.stringify({
+            code: aiResult.code,
+            provider: aiResult.provider ?? "unknown",
+            model: aiResult.model ?? "unknown",
+            latencyMs: aiResult.latencyMs,
+            retries: aiResult.retries,
+          }),
+          occurredAt: new Date(),
+        });
       } catch (dbErr) {
         console.error(
           "[Foundry Generation] Database error recording generation failure:",
@@ -261,6 +282,19 @@ async function executeGeneration(
           projectId: trimmedId,
           role: "assistant",
           content: `Safety validation rejected the proposed code changes: ${validation.error}. Previous project files were preserved.`,
+        });
+
+        await db.insert(runtimeLog).values({
+          id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          projectId: trimmedId,
+          userId: user.id,
+          runtimeSessionId: jobId,
+          operationId: "generation",
+          level: "error",
+          source: "backend",
+          eventType: "validation_failure",
+          message: `Code safety validation failed: ${validation.error}`,
+          occurredAt: new Date(),
         });
       } catch (dbErr) {
         console.error(
@@ -357,6 +391,29 @@ async function executeGeneration(
             aiResult.output.details.length > 0
               ? JSON.stringify(aiResult.output.details)
               : null,
+        });
+
+        // h. Persist Internal Diagnostic Log
+        await tx.insert(runtimeLog).values({
+          id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          projectId: trimmedId,
+          userId: user.id,
+          runtimeSessionId: jobId,
+          operationId: "generation",
+          level: "info",
+          source: "backend",
+          eventType: "generation_success",
+          message: `Generation succeeded using ${aiResult.provider}:${aiResult.model} in ${aiResult.latencyMs ?? 0}ms`,
+          details: JSON.stringify({
+            provider: aiResult.provider,
+            model: aiResult.model,
+            latencyMs: aiResult.latencyMs,
+            retries: aiResult.retries,
+            routeReason: aiResult.routeReason,
+            usage: aiResult.usage,
+            fileCount: aiResult.output.files.length,
+          }),
+          occurredAt: new Date(),
         });
       });
     } catch (txErr) {
@@ -460,7 +517,6 @@ export async function generateProjectCodeAction(
     const clarification = await assessClarification(
       trimmedPrompt,
       options?.references,
-      options?.provider,
     );
 
     if (
@@ -661,4 +717,98 @@ export async function inspectReferenceUrlAction(
     success: true,
     data: result,
   };
+}
+
+/**
+ * Automatically repairs internal compilation, syntax, or runtime errors in project code.
+ * Routes to the error_repair task on an eligible free coding model.
+ * Adheres strictly to AGENTS.md §1, §5.1, §5.2 and Prompt §2, §4, §5.
+ */
+export async function repairProjectCodeAction(
+  projectId: string,
+  errorDescription: string,
+): Promise<ActionResponse<GenerationActionResult>> {
+  let user: AuthUser;
+  try {
+    user = await requireUser();
+  } catch {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      error: "You must be signed in to repair code.",
+    };
+  }
+
+  const trimmedId = projectId?.trim();
+  const trimmedError = errorDescription?.trim();
+  if (!trimmedId || !trimmedError) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Project ID and error description are required.",
+    };
+  }
+
+  const proj = await getProjectByIdForUser(trimmedId, user.id);
+  if (!proj) {
+    return {
+      success: false,
+      code: "NOT_FOUND",
+      error: "Project not found or you lack permission to modify it.",
+    };
+  }
+
+  const repairSessionId = `repair_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const repairPrompt = `The Next.js 16 application failed inside the preview environment with this internal error:
+
+${trimmedError.slice(0, 3000)}
+
+Please analyze the error, locate the affected file, fix the syntax/import/runtime issue, and return the corrected file(s).`;
+
+  if (process.env.DATABASE_URL) {
+    try {
+      await db.insert(runtimeLog).values({
+        id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        projectId: trimmedId,
+        userId: user.id,
+        runtimeSessionId: repairSessionId,
+        operationId: "auto-repair",
+        level: "warn",
+        source: "backend",
+        eventType: "auto_repair_started",
+        message: `Autonomous self-repair started for internal error: ${trimmedError.slice(0, 200)}`,
+        details: JSON.stringify({ error: trimmedError.slice(0, 1000) }),
+        occurredAt: new Date(),
+      });
+    } catch {
+      // Non-blocking log insert
+    }
+  }
+
+  const result = await executeGeneration(trimmedId, user, repairPrompt, false);
+
+  if (process.env.DATABASE_URL) {
+    try {
+      await db.insert(runtimeLog).values({
+        id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        projectId: trimmedId,
+        userId: user.id,
+        runtimeSessionId: repairSessionId,
+        operationId: "auto-repair",
+        level: result.success ? "info" : "error",
+        source: "backend",
+        eventType: result.success
+          ? "auto_repair_succeeded"
+          : "auto_repair_failed",
+        message: result.success
+          ? "Autonomous self-repair successfully resolved the internal error."
+          : `Autonomous self-repair failed: ${result.error}`,
+        occurredAt: new Date(),
+      });
+    } catch {
+      // Non-blocking log insert
+    }
+  }
+
+  return result;
 }

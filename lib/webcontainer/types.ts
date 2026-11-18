@@ -9,14 +9,26 @@ export type WebContainerStatus =
   | "mounting"
   | "installing"
   | "starting"
+  | "waiting-ready"
   | "ready"
   | "recovering"
+  | "crashed"
   | "failed"
   | "stopped"
   | "unsupported"
   // Legacy aliases supported for full backward compatibility
   | "starting-server"
   | "error";
+
+export type WebContainerStageMetrics = {
+  readonly bootDurationMs?: number;
+  readonly mountDurationMs?: number;
+  readonly installDurationMs?: number;
+  readonly installSkipped?: boolean;
+  readonly serverReadyDurationMs?: number;
+  readonly totalStartupDurationMs?: number;
+  readonly measuredAt?: number;
+};
 
 export type WebContainerState = {
   readonly status: WebContainerStatus;
@@ -30,6 +42,7 @@ export type WebContainerState = {
   readonly runtimeSessionId: string | null;
   readonly operationId: string | null;
   readonly packageManager: "npm" | "pnpm";
+  readonly stageMetrics?: WebContainerStageMetrics | null;
 };
 
 export type FileEntry = {

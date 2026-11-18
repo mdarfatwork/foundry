@@ -22,18 +22,9 @@ import {
   Globe,
   ImageIcon,
   X,
-  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuGroup,
-  DropdownMenuLabel,
-} from "@/components/ui/dropdown-menu";
 import {
   generateProjectCodeAction,
   submitClarificationAnswersAction,
@@ -44,7 +35,6 @@ import type {
   FileModification,
   ClarificationPayload,
   ClarificationQuestion,
-  AIProvider,
   DesignReference,
   UrlReference,
 } from "@/lib/ai/types";
@@ -355,8 +345,6 @@ export function WorkspaceChatSidebar({
 }: WorkspaceChatSidebarProps) {
   const [inputValue, setInputValue] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] =
-    useState<AIProvider>("nvidia");
 
   // References state
   const [attachedScreenshot, setAttachedScreenshot] = useState<{
@@ -555,10 +543,9 @@ export function WorkspaceChatSidebar({
     onGeneratingChange?.(true);
 
     try {
-      // 3. Trigger Generation Server Action with provider and references
+      // 3. Trigger Generation Server Action with references and automatic free routing
       const response = await generateProjectCodeAction(projectId, promptText, {
         references,
-        provider: selectedProvider,
       });
 
       if (response.success) {
@@ -641,7 +628,7 @@ export function WorkspaceChatSidebar({
       )}
       aria-label="Assistant conversation panel"
     >
-      {/* 1. Chat Header with Provider Switcher */}
+      {/* 1. Chat Header with Automatic Free Routing Indicator */}
       <div className="h-10 px-3.5 border-b border-border bg-background/50 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-foreground" />
@@ -649,71 +636,13 @@ export function WorkspaceChatSidebar({
             Chat
           </span>
 
-          {/* AI Provider Switcher Dropdown */}
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <button
-                  type="button"
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border border-border/60 bg-muted/60 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
-                  aria-label="Select AI provider"
-                >
-                  <span>
-                    {selectedProvider === "nvidia"
-                      ? "NVIDIA GLM-5"
-                      : selectedProvider === "google"
-                        ? "Google Gemini"
-                        : "OpenRouter"}
-                  </span>
-                  <ChevronDown className="h-2.5 w-2.5 opacity-60" />
-                </button>
-              }
-            />
-            <DropdownMenuContent align="start" className="w-48 p-1">
-              <DropdownMenuGroup>
-                <DropdownMenuLabel className="text-[10px] text-muted-foreground px-2 py-1">
-                  AI Model Provider
-                </DropdownMenuLabel>
-                <DropdownMenuItem
-                  onClick={() => setSelectedProvider("nvidia")}
-                  className={cn(
-                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
-                    selectedProvider === "nvidia" && "font-medium bg-accent",
-                  )}
-                >
-                  <span>NVIDIA GLM-5.3</span>
-                  {selectedProvider === "nvidia" && (
-                    <Check className="h-3 w-3 text-primary" />
-                  )}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => setSelectedProvider("google")}
-                  className={cn(
-                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
-                    selectedProvider === "google" && "font-medium bg-accent",
-                  )}
-                >
-                  <span>Google Gemini 3.5</span>
-                  {selectedProvider === "google" && (
-                    <Check className="h-3 w-3 text-primary" />
-                  )}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => setSelectedProvider("openrouter")}
-                  className={cn(
-                    "text-xs px-2 py-1.5 cursor-pointer flex items-center justify-between",
-                    selectedProvider === "openrouter" &&
-                      "font-medium bg-accent",
-                  )}
-                >
-                  <span>OpenRouter (Free)</span>
-                  {selectedProvider === "openrouter" && (
-                    <Check className="h-3 w-3 text-primary" />
-                  )}
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-mono border border-border/60 bg-muted/50 text-muted-foreground"
+            title="Backend routes tasks automatically across verified free models."
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span>Auto Free Route</span>
+          </span>
         </div>
 
         <Button

@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import { WorkspaceChatSidebar } from "@/components/workspace/workspace-chat-sidebar";
 import { WorkspaceCanvas } from "@/components/workspace/workspace-canvas";
+import { repairProjectCodeAction } from "@/app/actions/generation";
 import type {
   ProjectRecord,
   ProjectFileRecord,
@@ -63,13 +64,8 @@ export function WorkspaceShell({
     project?.generationStatus === "generating",
   );
   const [fixErrorPrompt, setFixErrorPrompt] = useState<string | null>(null);
-
-  const handleRequestFixError = useCallback((errorDescription: string) => {
-    setFixErrorPrompt(
-      `Please fix this preview build/runtime error in my Next.js landing page:\n\n${errorDescription}`,
-    );
-    setActiveMobileTab("chat");
-  }, []);
+  const autoRepairedErrorsRef = useRef<Set<string>>(new Set());
+  const isRepairingRef = useRef(false);
 
   const handleFilesUpdated = useCallback(
     (updatedFiles: readonly FileModification[]) => {
@@ -100,6 +96,53 @@ export function WorkspaceShell({
       });
     },
     [slug],
+  );
+
+  const handleRequestFixError = useCallback(
+    async (errorDescription: string) => {
+      const errorKey = errorDescription.slice(0, 120);
+
+      // Autonomous single-attempt self-repair
+      if (
+        !autoRepairedErrorsRef.current.has(errorKey) &&
+        !isRepairingRef.current
+      ) {
+        autoRepairedErrorsRef.current.add(errorKey);
+        isRepairingRef.current = true;
+        setIsGenerating(true);
+
+        try {
+          const res = await repairProjectCodeAction(
+            project?.id ?? slug,
+            errorDescription,
+          );
+          if (res.success && res.data.type === "generated") {
+            handleFilesUpdated(res.data.updatedFiles);
+          } else {
+            setFixErrorPrompt(
+              `Please fix this preview build/runtime error in my Next.js landing page:\n\n${errorDescription}`,
+            );
+            setActiveMobileTab("chat");
+          }
+        } catch {
+          setFixErrorPrompt(
+            `Please fix this preview build/runtime error in my Next.js landing page:\n\n${errorDescription}`,
+          );
+          setActiveMobileTab("chat");
+        } finally {
+          setIsGenerating(false);
+          isRepairingRef.current = false;
+        }
+        return;
+      }
+
+      // If already attempted once, prefill prompt in chat sidebar so user can assist
+      setFixErrorPrompt(
+        `Please fix this preview build/runtime error in my Next.js landing page:\n\n${errorDescription}`,
+      );
+      setActiveMobileTab("chat");
+    },
+    [project, slug, handleFilesUpdated],
   );
 
   const projectName = project?.name || formatSlugToTitle(slug);
@@ -137,6 +180,7 @@ export function WorkspaceShell({
           viewportMode={viewportMode}
           onViewportModeChange={setViewportMode}
           onRequestFixError={handleRequestFixError}
+          onFilesUpdated={handleFilesUpdated}
           className={cn(
             activeMobileTab === "preview" ? "flex" : "hidden md:flex",
           )}

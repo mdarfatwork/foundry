@@ -146,8 +146,8 @@ export async function persistRuntimeLogsAction(
         };
       });
 
-      // 3. Batch insert into database
-      await db.insert(runtimeLog).values(rowsToInsert);
+      // 3. Batch insert into database (idempotent: ignore duplicate log IDs)
+      await db.insert(runtimeLog).values(rowsToInsert).onConflictDoNothing();
 
       return {
         success: true,

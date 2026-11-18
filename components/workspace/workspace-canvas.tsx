@@ -29,6 +29,30 @@ import { Button } from "@/components/ui/button";
 import { useWebContainer } from "@/hooks/use-webcontainer";
 import { WorkspaceDiagnosticsPanel } from "./workspace-diagnostics-panel";
 import type { ProjectRecord, ProjectFileRecord } from "@/app/actions/project";
+import type { FileModification } from "@/lib/ai/types";
+import type {
+  VerificationResult,
+  VerificationStage,
+  VerificationStageResult,
+  VerificationDiagnostic,
+  SmokeTestSummary,
+} from "@/lib/verification/types";
+import {
+  classifyBrowserDiagnostic,
+  deduplicateDiagnostics,
+} from "@/lib/verification/parser";
+import {
+  verifyManifestAndFiles,
+  runTypecheckStage,
+  runLintStage,
+  aggregateVerificationResult,
+} from "@/lib/verification/runner";
+import { canAttemptRepair } from "@/lib/verification/repair";
+import {
+  recordVerificationRunAction,
+  repairVerificationErrorsAction,
+} from "@/app/actions/verification";
+import { runtimeManager } from "@/lib/webcontainer/runtime-manager";
 import { cn } from "@/lib/utils";
 
 type ViewportMode = "desktop" | "tablet" | "mobile";
@@ -43,6 +67,7 @@ type WorkspaceCanvasProps = Readonly<{
   className?: string;
   isGenerating?: boolean;
   onRequestFixError?: (errorDescription: string) => void;
+  onFilesUpdated?: (updatedFiles: readonly FileModification[]) => void;
 }>;
 
 function normalizeFilePath(rawPath: string): string {
@@ -72,6 +97,7 @@ export function WorkspaceCanvas({
   className,
   isGenerating = false,
   onRequestFixError,
+  onFilesUpdated,
 }: WorkspaceCanvasProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [selectedFilePath, setSelectedFilePath] =
@@ -82,9 +108,26 @@ export function WorkspaceCanvas({
     boolean | null
   >(null);
 
+  // Verification & self-repair pipeline states
+  const [verificationResult, setVerificationResult] =
+    useState<VerificationResult | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [repairAttempts, setRepairAttempts] = useState(0);
+  const [browserDiagnostics, setBrowserDiagnostics] = useState<
+    readonly VerificationDiagnostic[]
+  >([]);
+  const [smokeSummary, setSmokeSummary] = useState<
+    SmokeTestSummary | undefined
+  >(undefined);
+
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const activeSlugRef = useRef<string | null>(null);
   const previousFilesKeyRef = useRef<string>("");
+  const isVerifyingRef = useRef(false);
+  const isRepairingRef = useRef(false);
+  const validationRunIdRef = useRef(0);
+  const lastVerifiedFilesKeyRef = useRef<string>("");
 
   // WebContainer browser runtime controller
   const {
@@ -93,12 +136,31 @@ export function WorkspaceCanvas({
     error: runtimeError,
     logs,
     isSupported,
-    loggerState,
     startWorkspace,
     recoverWorkspace,
     restartServer,
     syncFiles,
   } = useWebContainer();
+
+  // Listen for browser runtime diagnostics & smoke test results from preview iframe
+  useEffect(() => {
+    const handleWindowMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+
+      if (data.type === "FOUNDRY_PREVIEW_DIAGNOSTIC") {
+        const diag = classifyBrowserDiagnostic(data);
+        setBrowserDiagnostics((prev) =>
+          deduplicateDiagnostics([...prev, diag]),
+        );
+      } else if (data.type === "FOUNDRY_PREVIEW_SMOKE_RESULT" && data.summary) {
+        setSmokeSummary(data.summary);
+      }
+    };
+
+    window.addEventListener("message", handleWindowMessage);
+    return () => window.removeEventListener("message", handleWindowMessage);
+  }, []);
 
   // Derive terminal visibility: explicit user toggle takes precedence; otherwise opens on error/failure
   const showTerminal =
@@ -134,6 +196,7 @@ export function WorkspaceCanvas({
     if (activeSlugRef.current !== slug) {
       activeSlugRef.current = slug;
       previousFilesKeyRef.current = currentFilesKey;
+      validationRunIdRef.current++;
       startWorkspace(normalizedFiles, project?.id);
       return;
     }
@@ -141,6 +204,8 @@ export function WorkspaceCanvas({
     // Case 2: Subsequent file updates in the same project -> sync files incrementally (HMR)
     if (previousFilesKeyRef.current !== currentFilesKey) {
       previousFilesKeyRef.current = currentFilesKey;
+      // Invalidate running verification when files change
+      validationRunIdRef.current++;
       syncFiles(normalizedFiles);
     }
   }, [
@@ -151,6 +216,259 @@ export function WorkspaceCanvas({
     isSupported,
     project?.id,
   ]);
+
+  // Autonomous self-repair trigger: when WebContainer reports an internal compile/runtime error
+  const lastReportedErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      (status === "failed" || status === "error") &&
+      runtimeError &&
+      onRequestFixError &&
+      !isGenerating &&
+      lastReportedErrorRef.current !== runtimeError
+    ) {
+      const isInternalCodeError =
+        /failed to compile/i.test(runtimeError) ||
+        /syntaxerror/i.test(runtimeError) ||
+        /unhandled runtime error/i.test(runtimeError) ||
+        /module not found/i.test(runtimeError) ||
+        /cannot find module/i.test(runtimeError);
+
+      if (isInternalCodeError) {
+        lastReportedErrorRef.current = runtimeError;
+        onRequestFixError(runtimeError);
+      }
+    }
+  }, [status, runtimeError, onRequestFixError, isGenerating]);
+
+  const projectId = project?.id || slug;
+  const handleTriggerSelfRepairRef = useRef<
+    (diags?: readonly VerificationDiagnostic[]) => Promise<void>
+  >(async () => {});
+  const executeVerificationRef = useRef<() => Promise<void>>(async () => {});
+
+  // Core Fast Verification Pipeline Executor (TypeScript + ESLint only; no production build)
+  const executeVerification = useCallback(async () => {
+    if (isVerifyingRef.current || normalizedFiles.length === 0) return;
+
+    const filesKey = normalizedFiles
+      .map((f) => `${f.path}:${f.content.length}`)
+      .join("|");
+
+    // Avoid redundant verification if this exact set of files was already verified
+    if (
+      lastVerifiedFilesKeyRef.current === filesKey &&
+      verificationResult !== null &&
+      verificationResult.passed
+    ) {
+      return;
+    }
+
+    const currentRunId = ++validationRunIdRef.current;
+    isVerifyingRef.current = true;
+    setIsVerifying(true);
+
+    const stages: Partial<Record<VerificationStage, VerificationStageResult>> =
+      {};
+
+    try {
+      // Stage 1: Manifest & entry point check
+      const manifestRes = verifyManifestAndFiles(normalizedFiles);
+      stages.manifest = manifestRes;
+
+      if (currentRunId !== validationRunIdRef.current) return;
+
+      if (manifestRes.status === "failed") {
+        const aggregated = aggregateVerificationResult(
+          projectId,
+          stages,
+          browserDiagnostics,
+          smokeSummary,
+          repairAttempts,
+        );
+        if (currentRunId !== validationRunIdRef.current) return;
+        lastVerifiedFilesKeyRef.current = filesKey;
+        setVerificationResult(aggregated);
+        void recordVerificationRunAction({
+          projectId,
+          verification: aggregated,
+        });
+        return;
+      }
+
+      // Stage 2: WebContainer Fast Verification (TypeScript + ESLint only)
+      let container = null;
+      try {
+        container = await runtimeManager.getWebContainer();
+      } catch {
+        // Container not available yet
+      }
+
+      if (currentRunId !== validationRunIdRef.current) return;
+
+      if (container) {
+        // TypeScript check (tsc --noEmit)
+        const tsRes = await runTypecheckStage(container);
+        if (currentRunId !== validationRunIdRef.current) return;
+        stages.typecheck = tsRes;
+
+        // ESLint check (eslint app components lib --format stylish)
+        const lintRes = await runLintStage(container);
+        if (currentRunId !== validationRunIdRef.current) return;
+        stages.lint = lintRes;
+      }
+
+      // Stage 3: Aggregate results (No build stage during routine generation or repair)
+      const finalResult = aggregateVerificationResult(
+        projectId,
+        stages,
+        browserDiagnostics,
+        smokeSummary,
+        repairAttempts,
+      );
+
+      if (currentRunId !== validationRunIdRef.current) return;
+
+      lastVerifiedFilesKeyRef.current = filesKey;
+      setVerificationResult(finalResult);
+
+      // Log genuine error diagnostics to WebContainer runtime terminal
+      if (
+        finalResult.status === "failed" &&
+        finalResult.diagnostics.length > 0
+      ) {
+        for (const diag of finalResult.diagnostics) {
+          if (diag.severity === "error" || diag.severity === "fatal") {
+            const loc = diag.file
+              ? ` (${diag.file}${diag.line ? `:${diag.line}` : ""})`
+              : "";
+            runtimeManager.appendLog(
+              `[Foundry ${diag.source.toUpperCase()} ERROR]${loc} ${diag.message}`,
+              {
+                level: "error",
+                source: "webcontainer",
+                eventType: "validation_error",
+              },
+            );
+          }
+        }
+      }
+
+      // Persist verification run in background
+      void recordVerificationRunAction({
+        projectId,
+        verification: finalResult,
+      });
+
+      // Stage 4: Trigger Bounded Self-Repair if fixable errors exist (max 2 attempts)
+      if (
+        finalResult.status === "failed" &&
+        canAttemptRepair(finalResult.diagnostics, repairAttempts, 2) &&
+        !isRepairingRef.current
+      ) {
+        await handleTriggerSelfRepairRef.current(finalResult.diagnostics);
+      }
+    } finally {
+      if (currentRunId === validationRunIdRef.current) {
+        setIsVerifying(false);
+        isVerifyingRef.current = false;
+      }
+    }
+  }, [
+    normalizedFiles,
+    verificationResult,
+    projectId,
+    browserDiagnostics,
+    smokeSummary,
+    repairAttempts,
+  ]);
+
+  const handleTriggerSelfRepair = useCallback(
+    async (diagnosticsToFix?: readonly VerificationDiagnostic[]) => {
+      const diags = diagnosticsToFix ?? verificationResult?.diagnostics ?? [];
+      if (diags.length === 0 || isRepairingRef.current) return;
+
+      isRepairingRef.current = true;
+      setIsRepairing(true);
+      const nextAttempt = repairAttempts + 1;
+      setRepairAttempts(nextAttempt);
+
+      try {
+        const repairRes = await repairVerificationErrorsAction({
+          projectId,
+          diagnostics: diags,
+          currentFiles: normalizedFiles,
+          attemptNumber: nextAttempt,
+        });
+
+        if (repairRes.success && repairRes.data.updatedFiles.length > 0) {
+          if (onFilesUpdated) {
+            onFilesUpdated(repairRes.data.updatedFiles);
+          }
+          await syncFiles(repairRes.data.updatedFiles);
+
+          // Automatically re-verify fixed code with TS + ESLint
+          setTimeout(() => {
+            void executeVerificationRef.current();
+          }, 800);
+        } else if (onRequestFixError && diags.length > 0) {
+          // If automatic bounded repair could not resolve it, notify user in chat
+          onRequestFixError(diags.map((d) => d.message).join("\n"));
+        }
+      } catch (err) {
+        console.error("[Foundry Self-Repair] Repair failed:", err);
+      } finally {
+        setIsRepairing(false);
+        isRepairingRef.current = false;
+      }
+    },
+    [
+      verificationResult,
+      repairAttempts,
+      projectId,
+      normalizedFiles,
+      onFilesUpdated,
+      syncFiles,
+      onRequestFixError,
+    ],
+  );
+
+  useEffect(() => {
+    executeVerificationRef.current = executeVerification;
+  }, [executeVerification]);
+
+  useEffect(() => {
+    handleTriggerSelfRepairRef.current = handleTriggerSelfRepair;
+  }, [handleTriggerSelfRepair]);
+
+  // Trigger verification when dev server is ready or when generation concludes
+  const previousIsGeneratingRef = useRef(isGenerating);
+  useEffect(() => {
+    if (status === "ready" && normalizedFiles.length > 0 && !isGenerating) {
+      const timer = setTimeout(() => {
+        void executeVerification();
+      }, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [status, executeVerification, normalizedFiles.length, isGenerating]);
+
+  useEffect(() => {
+    if (
+      previousIsGeneratingRef.current &&
+      !isGenerating &&
+      normalizedFiles.length > 0
+    ) {
+      setRepairAttempts(0);
+      // Invalidate obsolete runs and reset verification status so stale results are discarded
+      validationRunIdRef.current++;
+      setVerificationResult(null);
+      const timer = setTimeout(() => {
+        void executeVerification();
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+    previousIsGeneratingRef.current = isGenerating;
+  }, [isGenerating, executeVerification, normalizedFiles.length]);
 
   const handleRefreshIframe = useCallback(() => {
     setIsRefreshingIframe(true);
@@ -639,6 +957,30 @@ export function WorkspaceCanvas({
                         Generating Code
                       </span>
                     </>
+                  ) : isRepairing ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
+                      <span className="text-[10px] font-mono text-amber-500 font-medium">
+                        Repairing Code ({repairAttempts}/2)
+                      </span>
+                    </>
+                  ) : isVerifying ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
+                      <span className="text-[10px] font-mono text-primary font-medium">
+                        Validating (TS + ESLint)
+                      </span>
+                    </>
+                  ) : verificationResult?.status === "failed" ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-destructive"
+                        aria-hidden="true"
+                      />
+                      <span className="text-[10px] font-mono text-destructive font-medium">
+                        Validation Failed
+                      </span>
+                    </>
                   ) : status === "booting" ? (
                     <>
                       <Loader2 className="h-2.5 w-2.5 animate-spin text-muted-foreground" />
@@ -667,6 +1009,13 @@ export function WorkspaceCanvas({
                         Starting Next.js
                       </span>
                     </>
+                  ) : status === "waiting-ready" ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
+                      <span className="text-[10px] font-mono text-amber-500 font-medium">
+                        Waiting for Readiness
+                      </span>
+                    </>
                   ) : status === "recovering" ? (
                     <>
                       <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-500" />
@@ -675,13 +1024,32 @@ export function WorkspaceCanvas({
                       </span>
                     </>
                   ) : status === "ready" ? (
+                    verificationResult && verificationResult.passed ? (
+                      <>
+                        <span
+                          className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
+                          aria-hidden="true"
+                        />
+                        <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 font-medium">
+                          Preview Ready
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
+                        <span className="text-[10px] font-mono text-primary font-medium">
+                          Validating (TS + ESLint)
+                        </span>
+                      </>
+                    )
+                  ) : status === "crashed" ? (
                     <>
                       <span
-                        className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
+                        className="h-1.5 w-1.5 rounded-full bg-destructive"
                         aria-hidden="true"
                       />
-                      <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 font-medium">
-                        Preview Ready
+                      <span className="text-[10px] font-mono text-destructive font-medium">
+                        Server Crashed
                       </span>
                     </>
                   ) : status === "failed" || status === "error" ? (
@@ -691,7 +1059,7 @@ export function WorkspaceCanvas({
                         aria-hidden="true"
                       />
                       <span className="text-[10px] font-mono text-destructive font-medium">
-                        Runtime Error
+                        Startup Failed
                       </span>
                     </>
                   ) : status === "stopped" ? (
@@ -717,17 +1085,93 @@ export function WorkspaceCanvas({
               </div>
 
               {/* Browser Frame Inner: Iframe or Loading/Error Overlay */}
-              <div className="flex-1 w-full h-full relative overflow-hidden bg-background">
+              <div
+                key="browser-frame-inner"
+                className="flex-1 w-full h-full relative overflow-hidden bg-background flex flex-col"
+              >
+                {/* Validation Failure Banner: displays real error & affected file while preserving iframe preview */}
+                {verificationResult?.status === "failed" &&
+                verificationResult.diagnostics.length > 0 ? (
+                  <div
+                    key="validation-failure-banner"
+                    className="bg-destructive/10 border-b border-destructive/20 px-3 py-2 flex items-center justify-between gap-3 shrink-0 z-10 text-xs"
+                  >
+                    <div className="flex items-start gap-2 min-w-0">
+                      <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <div className="font-medium text-destructive flex items-center gap-1.5 flex-wrap">
+                          <span>Validation Failed:</span>
+                          {verificationResult.diagnostics[0].file && (
+                            <span className="font-mono text-[11px] bg-destructive/15 px-1 py-0.5 rounded text-destructive">
+                              {verificationResult.diagnostics[0].file}
+                              {verificationResult.diagnostics[0].line
+                                ? `:${verificationResult.diagnostics[0].line}`
+                                : ""}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-destructive/90 font-mono truncate mt-0.5">
+                          {verificationResult.diagnostics[0].message}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {canAttemptRepair(
+                        verificationResult.diagnostics,
+                        repairAttempts,
+                        2,
+                      ) ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="destructive"
+                          onClick={() => void handleTriggerSelfRepair()}
+                          disabled={isRepairing}
+                          className="gap-1 text-xs cursor-pointer"
+                        >
+                          <Sparkles className="h-3 w-3" />
+                          <span>
+                            {isRepairing ? "Repairing..." : "Auto-Repair"}
+                          </span>
+                        </Button>
+                      ) : onRequestFixError ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="destructive"
+                          onClick={() =>
+                            onRequestFixError(
+                              verificationResult.diagnostics[0].message,
+                            )
+                          }
+                          className="gap-1 text-xs cursor-pointer"
+                        >
+                          <Sparkles className="h-3 w-3" />
+                          <span>Ask to Fix</span>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
                 {status === "ready" && previewUrl ? (
-                  <iframe
-                    ref={iframeRef}
-                    src={previewUrl}
-                    className="w-full h-full border-0 bg-background"
-                    title="Foundry Application Preview"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-                  />
+                  <div
+                    key="preview-iframe-wrapper"
+                    className="w-full flex-1 relative overflow-hidden"
+                  >
+                    <iframe
+                      ref={iframeRef}
+                      src={previewUrl}
+                      className="w-full h-full border-0 bg-background"
+                      title="Foundry Application Preview"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                    />
+                  </div>
                 ) : status === "unsupported" ? (
-                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                  <div
+                    key="status-unsupported"
+                    className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4"
+                  >
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-amber-500/20 bg-amber-500/10 text-amber-500 shadow-2xs">
                       <ShieldAlert className="h-6 w-6" />
                     </div>
@@ -743,17 +1187,26 @@ export function WorkspaceCanvas({
                       COOP: same-origin | COEP: credentialless
                     </p>
                   </div>
-                ) : status === "failed" || status === "error" ? (
-                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 select-text">
+                ) : status === "crashed" ||
+                  status === "failed" ||
+                  status === "error" ? (
+                  <div
+                    key="status-error"
+                    className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 select-text"
+                  >
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive shadow-2xs">
                       <AlertCircle className="h-6 w-6" />
                     </div>
                     <h3 className="text-base font-semibold text-foreground">
-                      Preview Execution Error
+                      {status === "crashed"
+                        ? "Development Server Crashed"
+                        : "Preview Startup Failed"}
                     </h3>
                     <p className="text-xs text-destructive leading-relaxed font-mono bg-destructive/10 p-2.5 rounded border border-destructive/20 text-left w-full break-words">
                       {runtimeError ||
-                        "The development server or build process failed to run."}
+                        (status === "crashed"
+                          ? "The development server process terminated unexpectedly."
+                          : "The development server failed to start.")}
                     </p>
                     <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
                       <Button
@@ -790,8 +1243,11 @@ export function WorkspaceCanvas({
                     </div>
                   </div>
                 ) : (
-                  /* Loading State (Booting / Installing / Starting Dev Server / Recovering) */
-                  <div className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                  /* Loading State (Booting / Mounting / Installing / Starting Dev Server / Waiting / Recovering) */
+                  <div
+                    key="status-loading"
+                    className="h-full p-8 flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4"
+                  >
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted/50 text-foreground shadow-2xs">
                       <Loader2 className="h-6 w-6 animate-spin text-primary" />
                     </div>
@@ -806,9 +1262,11 @@ export function WorkspaceCanvas({
                               : status === "starting" ||
                                   status === "starting-server"
                                 ? "Starting Next.js development server..."
-                                : status === "recovering"
-                                  ? "Recovering workspace and restarting preview..."
-                                  : "Preparing live preview..."}
+                                : status === "waiting-ready"
+                                  ? "Waiting for development server readiness..."
+                                  : status === "recovering"
+                                    ? "Recovering workspace and restarting preview..."
+                                    : "Preparing live preview..."}
                       </h3>
                       <p className="text-xs text-muted-foreground leading-relaxed">
                         Executing safely inside your browser using
@@ -833,7 +1291,9 @@ export function WorkspaceCanvas({
           <WorkspaceDiagnosticsPanel
             projectId={project?.id || slug}
             liveLogs={logs}
-            loggerState={loggerState}
+            verificationResult={verificationResult}
+            isRepairing={isRepairing}
+            onTriggerRepair={() => void handleTriggerSelfRepair()}
             onClose={() => setTerminalExplicitState(false)}
           />
         )}

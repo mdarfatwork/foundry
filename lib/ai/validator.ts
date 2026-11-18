@@ -62,6 +62,33 @@ const DANGEROUS_CODE_PATTERNS = [
 ];
 
 /**
+ * Automatically cleans known trivial corruption patterns in generated code before validation:
+ * 1. Corrupted import paths like `\u00components/` or `\u0040/` or un-aliased `components/ui/`
+ * 2. Relative traversal in internal import statements
+ */
+export function sanitizeGeneratedContent(content: string): string {
+  if (!content || typeof content !== "string") return content;
+
+  let sanitized = content;
+
+  // Fix corrupted import paths:
+  // 1. "\u00components/..." -> "@/components/..."
+  sanitized = sanitized.replace(/(['"])\\u00components\//g, "$1@/components/");
+  // 2. "\u0040/..." -> "@/..."
+  sanitized = sanitized.replace(/(['"])\\u0040\//g, "$1@/");
+  // 3. Fallback "\u00..." -> "@/..."
+  sanitized = sanitized.replace(/(['"])\\u00/g, "$1@/");
+
+  // Fix un-aliased internal imports: from "components/ui/..." -> from "@/components/ui/..."
+  sanitized = sanitized.replace(
+    /(from\s+['"])(?:(?:\.\.\/)+|\/)?(components\/|lib\/)/g,
+    "$1@/$2",
+  );
+
+  return sanitized;
+}
+
+/**
  * Normalizes a file path to POSIX relative form, eliminating Windows backslashes
  * and directory traversal attempts.
  */
@@ -97,6 +124,73 @@ export function normalizeRelativePath(rawPath: string): string {
  * Validates an array of proposed file modifications.
  * Returns { valid: true, files: [...] } or { valid: false, error: "..." }.
  */
+/**
+ * Deterministically synthesizes app/page.tsx when the model generated modular
+ * section components (e.g. components/sections/*) but omitted the composition page.
+ */
+function synthesizePageFromSections(
+  files: readonly FileModification[],
+): FileModification | null {
+  const sectionFiles = files.filter(
+    (f) =>
+      f.path.startsWith("components/sections/") &&
+      (f.path.endsWith(".tsx") || f.path.endsWith(".jsx")),
+  );
+
+  if (sectionFiles.length === 0) return null;
+
+  const imports: string[] = [];
+  const componentUsages: string[] = [];
+
+  for (const sf of sectionFiles) {
+    const importPath = `@/${sf.path.replace(/\.[^/.]+$/, "")}`;
+    const defaultExportMatch = sf.content.match(
+      /export\s+default\s+(?:function\s+)?([A-Za-z0-9_]+)/,
+    );
+    const namedExportMatch = sf.content.match(
+      /export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)/,
+    );
+
+    if (defaultExportMatch && defaultExportMatch[1]) {
+      const compName = defaultExportMatch[1];
+      imports.push(`import ${compName} from "${importPath}";`);
+      componentUsages.push(`      <${compName} />`);
+    } else if (namedExportMatch && namedExportMatch[1]) {
+      const compName = namedExportMatch[1];
+      imports.push(`import { ${compName} } from "${importPath}";`);
+      componentUsages.push(`      <${compName} />`);
+    } else {
+      const base = sf.path
+        .split("/")
+        .pop()
+        ?.replace(/\.[^/.]+$/, "");
+      if (base) {
+        const compName = base.charAt(0).toUpperCase() + base.slice(1);
+        imports.push(`import ${compName} from "${importPath}";`);
+        componentUsages.push(`      <${compName} />`);
+      }
+    }
+  }
+
+  if (componentUsages.length === 0) return null;
+
+  const content = `${imports.join("\n")}
+
+export default function Page() {
+  return (
+    <main className="min-h-screen bg-background text-foreground flex flex-col">
+${componentUsages.join("\n")}
+    </main>
+  );
+}
+`;
+
+  return {
+    path: "app/page.tsx",
+    content,
+  };
+}
+
 export function validateGeneratedFiles(
   proposedFiles: readonly FileModification[],
 ): ValidationResult {
@@ -140,7 +234,8 @@ export function validateGeneratedFiles(
       };
     }
 
-    const trimmedContent = file.content.trim();
+    const sanitizedContent = sanitizeGeneratedContent(file.content);
+    const trimmedContent = sanitizedContent.trim();
     if (trimmedContent.length === 0) {
       return {
         valid: false,
@@ -230,7 +325,7 @@ export function validateGeneratedFiles(
 
     validatedFiles.push({
       path: normalizedPath,
-      content: file.content,
+      content: sanitizedContent,
     });
   }
 
@@ -239,6 +334,15 @@ export function validateGeneratedFiles(
       valid: false,
       error: `Total generated code size (${Math.round(totalBytes / 1024)} KB) exceeds limit of ${MAX_TOTAL_SIZE_BYTES / 1024} KB.`,
     };
+  }
+
+  // If section components were generated but app/page.tsx was omitted,
+  // deterministically synthesize app/page.tsx so the application renders cleanly.
+  if (!validatedFiles.some((f) => f.path === "app/page.tsx")) {
+    const synthesized = synthesizePageFromSections(validatedFiles);
+    if (synthesized) {
+      validatedFiles.unshift(synthesized);
+    }
   }
 
   return {

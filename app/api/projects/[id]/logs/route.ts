@@ -167,7 +167,7 @@ export async function POST(
         metadata: sanitizeStructuredDetails(entry.metadata),
       }));
 
-      await db.insert(runtimeLog).values(rows);
+      await db.insert(runtimeLog).values(rows).onConflictDoNothing();
 
       return NextResponse.json({
         success: true,

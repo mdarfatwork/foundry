@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "ai-sdk": {
+      "source": "vercel/ai",
+      "sourceType": "github",
+      "skillPath": "skills/use-ai-sdk/SKILL.md",
+      "computedHash": "6bc642319c4ecbf9fbd59cef783b02174d4bd663c010703a6a6b80bda855b32d"
+    },
     "frontend-design": {
       "source": "anthropics/skills",
       "sourceType": "github",

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   validateGeneratedFiles,
   normalizeRelativePath,
+  sanitizeGeneratedContent,
 } from "@/lib/ai/validator";
 import type { FileModification } from "@/lib/ai/types";
 
@@ -178,6 +179,28 @@ describe("Code Validator & Sandbox Gate", () => {
       }
     });
 
+    it("synthesizes app/page.tsx when modular sections are emitted without a root page", () => {
+      const res = validateGeneratedFiles([
+        {
+          path: "components/sections/hero.tsx",
+          content: "export function Hero() { return <section>Hero</section>; }",
+        },
+        {
+          path: "components/sections/footer.tsx",
+          content:
+            "export default function Footer() { return <footer>Footer</footer>; }",
+        },
+      ]);
+      expect(res.valid).toBe(true);
+      if (res.valid) {
+        const page = res.files.find((f) => f.path === "app/page.tsx");
+        expect(page).toBeDefined();
+        expect(page?.content).toContain("export default function Page()");
+        expect(page?.content).toContain("<Hero />");
+        expect(page?.content).toContain("<Footer />");
+      }
+    });
+
     it("rejects files exceeding size limits", () => {
       const largeContent = "x".repeat(160 * 1024); // 160 KB
       const res = validateGeneratedFiles([
@@ -186,6 +209,45 @@ describe("Code Validator & Sandbox Gate", () => {
       expect(res.valid).toBe(false);
       if (!res.valid) {
         expect(res.error).toContain("exceeds the size limit");
+      }
+    });
+
+    it("automatically sanitizes corrupted import paths in generated code", () => {
+      const corrupted = `import { Button } from "\\u00components/ui/button";
+import { Card } from "\\u0040/components/ui/card";
+import { Hero } from "components/sections/hero";
+import { cn } from "lib/utils";
+import { Header } from "../../components/header";
+`;
+      const cleaned = sanitizeGeneratedContent(corrupted);
+
+      expect(cleaned).toContain(
+        'import { Button } from "@/components/ui/button";',
+      );
+      expect(cleaned).toContain('import { Card } from "@/components/ui/card";');
+      expect(cleaned).toContain(
+        'import { Hero } from "@/components/sections/hero";',
+      );
+      expect(cleaned).toContain('import { cn } from "@/lib/utils";');
+      expect(cleaned).toContain(
+        'import { Header } from "@/components/header";',
+      );
+    });
+
+    it("validates and auto-repairs corrupted imports when running validateGeneratedFiles", () => {
+      const res = validateGeneratedFiles([
+        {
+          path: "app/page.tsx",
+          content: `import { Button } from "\\u00components/ui/button";
+export default function Page() { return <Button>Test</Button>; }`,
+        },
+      ]);
+
+      expect(res.valid).toBe(true);
+      if (res.valid) {
+        expect(res.files[0].content).toContain(
+          'import { Button } from "@/components/ui/button";',
+        );
       }
     });
   });

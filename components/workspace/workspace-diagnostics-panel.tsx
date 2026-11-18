@@ -6,24 +6,19 @@ import {
   Database,
   RotateCw,
   AlertCircle,
-  AlertTriangle,
-  Info,
-  Bug,
   ChevronDown,
   ChevronRight,
   Copy,
   Check,
   Filter,
-  CheckCircle2,
-  XCircle,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   getProjectRuntimeLogsAction,
   type RuntimeLogRecord,
 } from "@/app/actions/project-logs";
-import type { LoggerState } from "@/lib/webcontainer/logger";
+import type { VerificationResult } from "@/lib/verification/types";
 import { cn } from "@/lib/utils";
 
 type DiagnosticsTab = "live" | "persisted";
@@ -31,16 +26,20 @@ type DiagnosticsTab = "live" | "persisted";
 type WorkspaceDiagnosticsPanelProps = Readonly<{
   projectId: string;
   liveLogs: readonly string[];
-  loggerState: LoggerState;
+  verificationResult?: VerificationResult | null;
   onClose: () => void;
+  onTriggerRepair?: () => void;
+  isRepairing?: boolean;
   className?: string;
 }>;
 
 export function WorkspaceDiagnosticsPanel({
   projectId,
   liveLogs,
-  loggerState,
+  verificationResult,
   onClose,
+  onTriggerRepair,
+  isRepairing = false,
   className,
 }: WorkspaceDiagnosticsPanelProps) {
   const [activeTab, setActiveTab] = useState<DiagnosticsTab>("live");
@@ -51,7 +50,7 @@ export function WorkspaceDiagnosticsPanel({
   const [persistedError, setPersistedError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
 
-  // Filters
+  // Filters for Persisted Logs
   const [levelFilter, setLevelFilter] = useState<
     "all" | "error" | "warn" | "info" | "debug"
   >("all");
@@ -109,14 +108,16 @@ export function WorkspaceDiagnosticsPanel({
       setHasCopiedLive(true);
       setTimeout(() => setHasCopiedLive(false), 2000);
     } catch {
-      // Ignore
+      // Ignore clipboard error
     }
   };
+
+  const errorCount = verificationResult?.errorCount ?? 0;
 
   return (
     <div
       className={cn(
-        "h-64 border-t border-border bg-card text-foreground font-sans flex flex-col shrink-0 select-text z-20 shadow-lg",
+        "h-72 border-t border-border bg-card text-foreground font-sans flex flex-col shrink-0 select-text z-20 shadow-lg",
         className,
       )}
       aria-label="Workspace diagnostics and terminal panel"
@@ -124,7 +125,7 @@ export function WorkspaceDiagnosticsPanel({
       {/* Top Header Bar */}
       <div className="h-8 px-3 border-b border-border/60 bg-muted/30 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-2">
-          {/* Tab Switcher */}
+          {/* Focused Tab Switcher: Live Terminal & Persisted Logs */}
           <div className="flex items-center rounded-md bg-muted p-0.5 text-xs border border-border/40">
             <button
               type="button"
@@ -153,36 +154,30 @@ export function WorkspaceDiagnosticsPanel({
               )}
             >
               <Database className="h-3 w-3 text-primary" />
-              <span>Persisted Logs (DB)</span>
+              <span>Persisted Logs</span>
             </button>
-          </div>
-
-          {/* Sync indicator pill */}
-          <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono bg-muted/60 text-muted-foreground border border-border/40">
-            {loggerState.persistenceError ? (
-              <>
-                <XCircle className="h-3 w-3 text-rose-500" />
-                <span className="text-rose-500 truncate max-w-[200px]">
-                  {loggerState.persistenceError}
-                </span>
-              </>
-            ) : loggerState.isPersisting ? (
-              <>
-                <RotateCw className="h-2.5 w-2.5 animate-spin text-primary" />
-                <span>Syncing logs...</span>
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
-                <span>DB Synced ({loggerState.totalSent} sent)</span>
-              </>
-            )}
           </div>
         </div>
 
         {/* Right Action Controls */}
         <div className="flex items-center gap-1.5">
-          {activeTab === "live" ? (
+          {onTriggerRepair && errorCount > 0 && (
+            <Button
+              type="button"
+              size="xs"
+              variant="destructive"
+              onClick={onTriggerRepair}
+              disabled={isRepairing}
+              className="gap-1 text-xs cursor-pointer"
+            >
+              <Sparkles className="h-3 w-3" />
+              <span>
+                {isRepairing ? "Repairing..." : `Auto-Repair (${errorCount})`}
+              </span>
+            </Button>
+          )}
+
+          {activeTab === "live" && (
             <Button
               type="button"
               variant="ghost"
@@ -202,7 +197,9 @@ export function WorkspaceDiagnosticsPanel({
                 </>
               )}
             </Button>
-          ) : (
+          )}
+
+          {activeTab === "persisted" && (
             <Button
               type="button"
               variant="ghost"
@@ -236,29 +233,62 @@ export function WorkspaceDiagnosticsPanel({
       {/* Main Panel Content */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         {activeTab === "live" ? (
-          /* Live Terminal View */
-          <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed bg-black/95 text-zinc-300 select-text space-y-0.5">
-            {liveLogs.length === 0 ? (
-              <div className="text-muted-foreground italic">
-                No process output recorded yet.
-              </div>
-            ) : (
-              liveLogs.map((log, idx) => (
-                <div
-                  key={`${idx}_${log.slice(0, 10)}`}
-                  className={cn(
-                    "whitespace-pre-wrap break-words",
-                    log.includes("ERROR") || log.includes("failed")
-                      ? "text-rose-400"
-                      : log.includes("ready") || log.includes("Synced")
-                        ? "text-emerald-400"
-                        : "text-zinc-300",
+          /* Live Terminal View with Actionable Error Banner */
+          <div className="flex-1 flex flex-col min-h-0">
+            {verificationResult?.status === "failed" &&
+              verificationResult.diagnostics.length > 0 && (
+                <div className="bg-destructive/10 border-b border-destructive/20 px-3 py-1.5 text-xs flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2 text-destructive font-mono truncate min-w-0">
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="font-semibold shrink-0">
+                      Validation Issue:
+                    </span>
+                    <span className="truncate">
+                      {verificationResult.diagnostics[0].file
+                        ? `${verificationResult.diagnostics[0].file}${verificationResult.diagnostics[0].line ? `:${verificationResult.diagnostics[0].line}` : ""}: `
+                        : ""}
+                      {verificationResult.diagnostics[0].message}
+                    </span>
+                  </div>
+                  {onTriggerRepair && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={onTriggerRepair}
+                      disabled={isRepairing}
+                      className="shrink-0 h-6 text-[11px] gap-1 text-destructive border-destructive/30 hover:bg-destructive/10 cursor-pointer"
+                    >
+                      <Sparkles className="h-2.5 w-2.5" />
+                      <span>Repair</span>
+                    </Button>
                   )}
-                >
-                  {log}
                 </div>
-              ))
-            )}
+              )}
+
+            <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed bg-black/95 text-zinc-300 select-text space-y-0.5">
+              {liveLogs.length === 0 ? (
+                <div className="text-muted-foreground italic">
+                  No process output recorded yet.
+                </div>
+              ) : (
+                liveLogs.map((log, idx) => (
+                  <div
+                    key={`${idx}_${log.slice(0, 10)}`}
+                    className={cn(
+                      "whitespace-pre-wrap break-words",
+                      log.includes("ERROR") || log.includes("failed")
+                        ? "text-rose-400 font-semibold"
+                        : log.includes("ready") || log.includes("Synced")
+                          ? "text-emerald-400"
+                          : "text-zinc-300",
+                    )}
+                  >
+                    {log}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         ) : (
           /* Persisted Logs DB View */
@@ -306,167 +336,90 @@ export function WorkspaceDiagnosticsPanel({
                 </select>
               </div>
 
-              <span className="text-[10px] text-muted-foreground font-mono">
-                {persistedLogs.length} records
+              <span className="text-[11px] text-muted-foreground">
+                Showing {persistedLogs.length} events
               </span>
             </div>
 
-            {/* Persisted Logs List */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-1 bg-background select-text font-mono text-xs">
-              {isLoadingPersisted && persistedLogs.length === 0 ? (
-                <div className="p-6 text-center text-xs text-muted-foreground flex items-center justify-center gap-2">
-                  <RotateCw className="h-3.5 w-3.5 animate-spin text-primary" />
-                  <span>
-                    Loading persisted diagnostic logs from database...
-                  </span>
-                </div>
-              ) : persistedError ? (
-                <div className="p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-xs">
-                  <p className="font-semibold">Failed to load logs</p>
-                  <p className="text-[11px] opacity-90">{persistedError}</p>
+            {/* Logs List */}
+            <div className="flex-1 overflow-y-auto p-3 text-xs space-y-1">
+              {persistedError ? (
+                <div className="p-3 rounded-lg border border-destructive/40 bg-destructive/10 text-destructive text-xs">
+                  {persistedError}
                 </div>
               ) : persistedLogs.length === 0 ? (
-                <div className="p-6 text-center text-xs text-muted-foreground">
-                  No persisted diagnostic logs found matching criteria.
+                <div className="p-6 text-center text-muted-foreground italic">
+                  {isLoadingPersisted
+                    ? "Loading persisted logs from database..."
+                    : "No runtime logs found for this project."}
                 </div>
               ) : (
                 persistedLogs.map((log) => {
                   const isExpanded = expandedLogId === log.id;
+                  const isError = log.level === "error";
+                  const isWarn = log.level === "warn";
+
                   return (
                     <div
                       key={log.id}
-                      className="border border-border/60 rounded-md bg-card/60 p-2 text-[11px] transition-colors hover:bg-muted/30"
+                      className={cn(
+                        "border rounded p-1.5 text-xs transition-colors",
+                        isError
+                          ? "bg-destructive/5 border-destructive/30 text-destructive"
+                          : isWarn
+                            ? "bg-amber-500/5 border-amber-500/30 text-amber-700 dark:text-amber-300"
+                            : "border-border/60 bg-card hover:bg-muted/40",
+                      )}
                     >
-                      <div
-                        className="flex items-start justify-between gap-2 cursor-pointer"
+                      <button
+                        type="button"
                         onClick={() =>
                           setExpandedLogId(isExpanded ? null : log.id)
                         }
+                        className="w-full flex items-center justify-between text-left gap-2 cursor-pointer font-mono"
                       >
-                        <div className="flex items-start gap-2 min-w-0 flex-1">
-                          <button
-                            type="button"
-                            className="mt-0.5 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
-                          >
-                            {isExpanded ? (
-                              <ChevronDown className="h-3 w-3" />
-                            ) : (
-                              <ChevronRight className="h-3 w-3" />
-                            )}
-                          </button>
-
-                          {/* Level Badge */}
-                          {log.level === "error" ? (
-                            <Badge
-                              variant="destructive"
-                              className="px-1 py-0 text-[9px] uppercase font-mono gap-1 shrink-0"
-                            >
-                              <AlertCircle className="h-2.5 w-2.5" />
-                              <span>ERR</span>
-                            </Badge>
-                          ) : log.level === "warn" ? (
-                            <Badge
-                              variant="outline"
-                              className="px-1 py-0 text-[9px] uppercase font-mono gap-1 text-amber-500 border-amber-500/40 shrink-0"
-                            >
-                              <AlertTriangle className="h-2.5 w-2.5" />
-                              <span>WARN</span>
-                            </Badge>
-                          ) : log.level === "info" ? (
-                            <Badge
-                              variant="outline"
-                              className="px-1 py-0 text-[9px] uppercase font-mono gap-1 text-emerald-500 border-emerald-500/40 shrink-0"
-                            >
-                              <Info className="h-2.5 w-2.5" />
-                              <span>INFO</span>
-                            </Badge>
+                        <div className="flex items-center gap-2 truncate">
+                          {isExpanded ? (
+                            <ChevronDown className="h-3 w-3 shrink-0" />
                           ) : (
-                            <Badge
-                              variant="outline"
-                              className="px-1 py-0 text-[9px] uppercase font-mono gap-1 text-muted-foreground shrink-0"
-                            >
-                              <Bug className="h-2.5 w-2.5" />
-                              <span>DBG</span>
-                            </Badge>
+                            <ChevronRight className="h-3 w-3 shrink-0" />
                           )}
-
-                          {/* Source Badge */}
-                          <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded font-mono shrink-0">
-                            {log.source}
+                          <span
+                            className={cn(
+                              "text-[10px] font-bold uppercase",
+                              isError
+                                ? "text-destructive"
+                                : isWarn
+                                  ? "text-amber-500"
+                                  : "text-muted-foreground",
+                            )}
+                          >
+                            [{log.level}]
                           </span>
-
-                          {/* Event type */}
-                          <span className="text-[10px] text-foreground font-semibold shrink-0">
-                            {log.eventType}
+                          <span className="text-muted-foreground text-[10px]">
+                            {log.source}:
                           </span>
-
-                          {/* Message snippet */}
-                          <span className="truncate text-muted-foreground flex-1">
+                          <span className="truncate text-foreground">
                             {log.message}
                           </span>
                         </div>
 
-                        {/* Timestamp */}
-                        <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                        <span className="text-[10px] text-muted-foreground shrink-0">
                           {new Date(log.occurredAt).toLocaleTimeString()}
                         </span>
-                      </div>
+                      </button>
 
-                      {/* Expanded Details */}
                       {isExpanded && (
-                        <div className="mt-2 pt-2 border-t border-border/40 pl-5 space-y-1.5 text-[11px] font-mono select-text">
-                          <div className="whitespace-pre-wrap break-words text-foreground bg-muted/40 p-2 rounded border border-border/40">
-                            {log.message}
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[10px] text-muted-foreground">
-                            <div>
-                              <span className="font-semibold text-foreground">
-                                Session ID:
-                              </span>{" "}
-                              {log.runtimeSessionId}
-                            </div>
-                            <div>
-                              <span className="font-semibold text-foreground">
-                                Time:
-                              </span>{" "}
-                              {new Date(log.occurredAt).toISOString()}
-                            </div>
-                            {log.operationId && (
-                              <div>
-                                <span className="font-semibold text-foreground">
-                                  Operation:
-                                </span>{" "}
-                                {log.operationId}
-                              </div>
-                            )}
-                            {log.processExitCode !== null && (
-                              <div>
-                                <span className="font-semibold text-foreground">
-                                  Exit Code:
-                                </span>{" "}
-                                {log.processExitCode}
-                              </div>
-                            )}
-                          </div>
-
+                        <div className="mt-2 pt-2 border-t border-border/40 font-mono text-[11px] space-y-1 text-muted-foreground">
                           {log.details && (
                             <div>
-                              <span className="text-[10px] font-semibold text-foreground block mb-0.5">
-                                Structured Details:
-                              </span>
-                              <pre className="p-2 rounded bg-black/80 text-emerald-400 text-[10px] overflow-auto max-h-32">
-                                {(() => {
-                                  try {
-                                    return JSON.stringify(
-                                      JSON.parse(log.details),
-                                      null,
-                                      2,
-                                    );
-                                  } catch {
-                                    return log.details;
-                                  }
-                                })()}
+                              <span className="font-semibold text-foreground">
+                                Details:
+                              </span>{" "}
+                              <pre className="bg-muted p-1.5 rounded mt-0.5 whitespace-pre-wrap break-words text-foreground">
+                                {typeof log.details === "string"
+                                  ? log.details
+                                  : JSON.stringify(log.details, null, 2)}
                               </pre>
                             </div>
                           )}
@@ -477,7 +430,6 @@ export function WorkspaceDiagnosticsPanel({
                 })
               )}
 
-              {/* Load More Button */}
               {nextCursor && (
                 <div className="pt-2 text-center">
                   <Button
@@ -488,7 +440,7 @@ export function WorkspaceDiagnosticsPanel({
                     disabled={isLoadingPersisted}
                     className="text-xs"
                   >
-                    Load More Logs
+                    Load More Events
                   </Button>
                 </div>
               )}

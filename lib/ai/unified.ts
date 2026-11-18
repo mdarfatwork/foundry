@@ -1,138 +1,72 @@
 import { generateText } from "ai";
 import {
-  createLanguageModel,
-  resolveActiveProvider,
+  createLanguageModelFromRegistry,
   isProviderConfigured,
-  getProviderConfig,
   redactSecrets,
-  DEFAULT_NVIDIA_MODEL,
 } from "./providers";
 import {
-  generateWebsiteWithNvidia,
-  assessClarificationWithNvidia,
-  extractStructuredOutput,
   extractClarificationOutput,
-} from "./nvidia";
-import { formatReferencesForPrompt } from "./references";
+  extractStructuredOutput,
+  JSON_REPAIR_INSTRUCTION,
+  parseDesignBrief,
+} from "./parse";
+import {
+  buildClarificationSystemPrompt,
+  buildDesignBriefPrompt,
+  buildGenerationSystemPrompt,
+  composeBriefedUserPrompt,
+  inferRecipeFromPrompt,
+} from "./prompts";
+import {
+  markProviderCooldown,
+  selectModelForTask,
+  type RouteSelection,
+} from "./router";
+import type { DesignBrief } from "./schemas";
 import type {
-  AIProvider,
-  GenerateWebsiteOptions,
   AIGenerationResult,
   ClarificationResult,
   DesignReference,
-  FileModification,
+  GenerateWebsiteOptions,
+  GenerationErrorCode,
+  GenerationTask,
 } from "./types";
+import { resolveRegistryModelId, type RegistryModel } from "./registry";
 
 /**
- * Unified Multi-Provider AI Engine for Foundry.
- * Coordinates generation across Google Gemini, OpenRouter, and NVIDIA NIM using Vercel AI SDK.
- * Supports adaptive clarification, reference URLs/screenshots, fallback routing, and secret redaction.
- * Adheres strictly to AGENTS.md §1, §5.1, §5.2, and Prompt §4, §5, §6, §7.
+ * Unified free-model AI engine for Foundry.
+ * All calls use the Vercel AI SDK. Routing is automatic and free-only.
  */
 
-const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes for full page code generation
-const CLARIFICATION_TIMEOUT_MS = 45_000; // 45 seconds max for clarification check
+const DEFAULT_TIMEOUT_MS = 60_000;
+const CLARIFICATION_TIMEOUT_MS = 25_000;
+const BRIEF_TIMEOUT_MS = 25_000;
+const MAX_PROVIDER_ATTEMPTS = 3;
 
-function buildUnifiedSystemPrompt(
-  existingFiles: readonly FileModification[],
-  references?: readonly DesignReference[],
-): string {
-  const existingFileList = existingFiles.map((f) => `- ${f.path}`).join("\n");
-  const referencesSection = formatReferencesForPrompt(references);
-
-  const currentPageFile = existingFiles.find((f) => f.path === "app/page.tsx");
-  const currentPageSnippet = currentPageFile?.content?.trim()
-    ? `\n### Current app/page.tsx Source (Review for edits, tweaks, or bug fixes):\n\`\`\`tsx\n${currentPageFile.content.slice(0, 9000)}\n\`\`\`\n`
-    : "";
-
-  return `You are Foundry's expert full-stack Next.js, React 19, and Tailwind CSS AI engineer.
-Your task is to generate or edit the user's requested single-page website inside an existing Next.js + Tailwind CSS v4 project.
-
-### Project Architecture & Established File Structure:
-- Root-level configuration files are ALREADY configured and fixed:
-  - package.json
-  - tsconfig.json
-  - next.config.ts
-  - components.json
-  - postcss.config.mjs
-  Do NOT modify or output any of these root configuration files!
-- Project Source Files:
-  - app/globals.css (Tailwind v4 OKLCH tokens)
-  - app/layout.tsx (Root HTML & Body wrapper)
-  - app/page.tsx (Main application landing page - THIS IS YOUR PRIMARY TARGET)
-  - lib/utils.ts (Exports cn helper)
-  - components/ui/button.tsx (Button primitive with default, outline, secondary, ghost, destructive)
-  - components/ui/card.tsx (Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter)
-  - components/ui/badge.tsx (Badge with default, secondary, outline, destructive)
-- Icons: lucide-react (import { ArrowRight, Check, Sparkles, Star, Shield, Search } from "lucide-react")
-- Animation: motion (import { motion } from "motion/react") for smooth transitions, entry animations, and hover effects.
-
-### Existing Project Files in Repository:
-${existingFileList}
-${currentPageSnippet}
-${referencesSection ? `\n${referencesSection}\n` : ""}
-### Free Photography Sourcing (Unsplash):
-When the landing page benefits from visual imagery (hero visual, feature cards, showcase, team, testimonials):
-- Use clean, functional Unsplash image URLs with auto=format&fit=crop&w=1200&q=80 query parameters.
-- Verified photography candidates:
-  - Tech / SaaS: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80"
-  - Architecture / Real Estate: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80"
-  - Creative / Studio: "https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=1200&q=80"
-  - Testimonial Avatars: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80", "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=300&q=80"
-- Apply responsive aspect ratio classes (e.g. aspect-video, aspect-square), object-cover, and loading="lazy" for below-the-fold images.
-- Do NOT embed large base64 images into TSX code.
-
-### Strict Generation & Bug-Fixing Scope:
-1. Generate or update a complete, polished, production-ready "app/page.tsx" containing all requested sections.
-2. Reuse the existing shadcn/ui components (@/components/ui/button, @/components/ui/card, @/components/ui/badge) and @/lib/utils (cn).
-3. Do NOT generate unnecessary configuration files or invent fake folders like "config/".
-4. Keep mock data items concise (e.g. 3 featured cards/properties, 2-3 testimonials/services) so the entire page is clean, modular, and completes reliably within token limits.
-5. Never truncate code with comments like "// ...rest of code". Provide 100% complete TypeScript TSX code.
-6. app/page.tsx MUST include "export default function Page() { ... }" or "export default function HomePage() { ... }".
-
-### Critical Rules for Follow-Ups, Edits, and Bug Fixes:
-- If the user asks to fix an issue, repair a bug, make an edit, or follow up on a previous request (e.g. "fix the issue in that", "make the hero darker", "fix the error"):
-  - Inspect the current "app/page.tsx" source code provided above.
-  - Fix any syntax errors, invalid imports, hydration errors, or layout issues.
-  - Return the FULL, updated "app/page.tsx" in the "files" array.
-  - You MUST ALWAYS respond with a valid JSON object matching the schema below.
-  - NEVER respond with plain conversational text alone without the "files" array.
-
-### Strict JSON Output Schema:
-You MUST reply with ONLY a single, valid RFC 8259 JSON object.
-CRITICAL JSON FORMATTING REQUIREMENT:
-- The JSON response must be 100% syntactically valid JSON parseable by JSON.parse().
-- Inside the "content" string value, all double quotes MUST be properly escaped as \\" (e.g. className=\\"...\\").
-- Newlines inside the "content" string MUST be escaped as \\n.
-- Never write raw unescaped quotes or raw control characters inside the "content" string.
-{
-  "summary": "1-2 sentence description of what was designed, fixed, or updated.",
-  "details": [
-    "Key visual layout or hero section created",
-    "Feature architecture or components highlighted",
-    "Interactivity and responsive polish applied"
-  ],
-  "files": [
-    {
-      "path": "app/page.tsx",
-      "content": "...complete valid TypeScript TSX..."
-    }
-  ]
-}`;
+function detectTask(options: GenerateWebsiteOptions): GenerationTask {
+  if (options.task) return options.task;
+  const prompt = options.prompt.toLowerCase();
+  const hasPage = options.existingFiles.some(
+    (f) =>
+      f.path === "app/page.tsx" &&
+      f.content.includes("export default") &&
+      f.content.length > 400,
+  );
+  if (
+    hasPage &&
+    /(fix|repair|error|bug|broken|update|change|tweak|edit|adjust)/.test(prompt)
+  ) {
+    return /fix|repair|error|bug|broken/.test(prompt)
+      ? "error_repair"
+      : "follow_up_edit";
+  }
+  return "landing_page";
 }
 
-/**
- * Assesses whether a user's prompt is broad and generates 2-3 multiple-choice
- * clarification questions using the configured AI provider.
- */
-export async function assessClarification(
+export function promptAlreadySpecific(
   prompt: string,
   references?: readonly DesignReference[],
-  providerOverride?: AIProvider,
-): Promise<ClarificationResult> {
-  const provider = resolveActiveProvider(providerOverride);
-
-  // If prompt already contains rich design references or detailed sections, skip clarification
+): boolean {
   const trimmed = prompt.trim();
   const words = trimmed.split(/\s+/);
   const sectionMatches = trimmed.match(
@@ -143,250 +77,370 @@ export async function assessClarification(
     /(color|theme|palette|font|typography|dark|light|minimal|luxury|gold|black|white|elegant|modern|aesthetic|responsive|clean)/i.test(
       trimmed,
     );
+  const hasAudience =
+    /(audience|customers|clients|founders|patients|homeowners|developers|designers|collectors)/i.test(
+      trimmed,
+    );
+  const hasCta =
+    /(cta|call to action|book|sign up|buy|contact|get started|waitlist)/i.test(
+      trimmed,
+    );
 
+  if (references && references.length > 0 && uniqueSections.size >= 2) {
+    return true;
+  }
+  if (uniqueSections.size >= 3 && hasStyleDirectives) return true;
+  if (words.length >= 45 && uniqueSections.size >= 2) return true;
+  if (words.length >= 65) return true;
+  if (uniqueSections.size >= 2 && hasAudience && hasCta && hasStyleDirectives) {
+    return true;
+  }
+  return false;
+}
+
+export const isPromptSufficientlyDetailed = promptAlreadySpecific;
+
+function classifyError(errorMsg: string): GenerationErrorCode | null {
   if (
-    (references && references.length > 0 && uniqueSections.size >= 2) ||
-    (uniqueSections.size >= 3 && hasStyleDirectives) ||
-    (words.length >= 45 && uniqueSections.size >= 2) ||
-    words.length >= 65
+    /api key not valid/i.test(errorMsg) ||
+    /invalid api key/i.test(errorMsg) ||
+    /api_key_invalid/i.test(errorMsg) ||
+    /credit card/i.test(errorMsg) ||
+    /card on file/i.test(errorMsg) ||
+    /not found for account/i.test(errorMsg)
+  ) {
+    return "CONFIG_ERROR";
+  }
+  if (errorMsg.includes("429") || /rate[- ]limit/i.test(errorMsg)) {
+    return "RATE_LIMIT";
+  }
+  if (
+    errorMsg.includes("timeout") ||
+    /timed?[- ]?out/i.test(errorMsg) ||
+    /AbortError/i.test(errorMsg)
+  ) {
+    return "TIMEOUT";
+  }
+  return null;
+}
+
+async function callTextModel(options: {
+  readonly model: RegistryModel;
+  readonly system?: string;
+  readonly prompt?: string;
+  readonly messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  readonly timeoutMs: number;
+  readonly maxOutputTokens: number;
+  readonly temperature?: number;
+}): Promise<{
+  readonly text: string;
+  readonly usage?: {
+    readonly promptTokens?: number;
+    readonly completionTokens?: number;
+  };
+}> {
+  const languageModel = createLanguageModelFromRegistry(options.model);
+  const common = {
+    model: languageModel,
+    system: options.system,
+    temperature: options.temperature ?? 0.2,
+    maxOutputTokens: options.maxOutputTokens,
+    abortSignal: AbortSignal.timeout(options.timeoutMs),
+  };
+
+  const { text, usage } =
+    options.prompt !== undefined
+      ? await generateText({ ...common, prompt: options.prompt })
+      : await generateText({ ...common, messages: options.messages ?? [] });
+
+  return {
+    text,
+    usage: {
+      promptTokens: usage?.inputTokens,
+      completionTokens: usage?.outputTokens,
+    },
+  };
+}
+
+async function withFreeFallbacks<T>(
+  task: GenerationTask,
+  run: (selection: RouteSelection) => Promise<T>,
+): Promise<T> {
+  const tried: string[] = [];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < MAX_PROVIDER_ATTEMPTS; attempt++) {
+    const selection = selectModelForTask(task, { excludeIds: tried });
+    if ("error" in selection) {
+      throw Object.assign(new Error(selection.error), {
+        code: selection.code,
+      });
+    }
+
+    tried.push(selection.model.id);
+    try {
+      return await run(selection);
+    } catch (error) {
+      lastError = error;
+      const msg =
+        error instanceof Error ? error.message : "Provider call failed.";
+      const code = classifyError(msg);
+      if (
+        code === "RATE_LIMIT" ||
+        code === "TIMEOUT" ||
+        code === "PROVIDER_ERROR" ||
+        !code
+      ) {
+        markProviderCooldown(
+          selection.model.provider,
+          resolveRegistryModelId(selection.model),
+        );
+      }
+      if (code === "CONFIG_ERROR") {
+        // Skip this provider for the rest of the process
+        continue;
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("All eligible free providers failed.");
+}
+
+/**
+ * Builds a deterministic brief when the model is unavailable.
+ */
+export function buildDeterministicDesignBrief(prompt: string): DesignBrief {
+  const recipe = inferRecipeFromPrompt(prompt);
+  return {
+    businessType: prompt.slice(0, 80),
+    audience: "Primary customers described in the request",
+    primaryGoal: "Convert visitors toward the main CTA",
+    cta: "Get started",
+    recipe,
+    visualStyle: `Distinct ${recipe.replace("_", " ")} direction tailored to the business`,
+    typography:
+      "Expressive display + readable body; avoid default Inter/Roboto stacks in copy guidance",
+    palette:
+      "Business-specific semantic OKLCH tokens; no purple gradient defaults",
+    imagery: "Relevant Unsplash photography matching the trade or product",
+    sections: ["hero", "features", "proof-or-work", "cta", "footer"],
+    interactions: "Subtle motion on CTA/hero only; respect reduced motion",
+  };
+}
+
+export async function deriveDesignBrief(prompt: string): Promise<DesignBrief> {
+  // If the prompt is already highly specific or too short for extraction,
+  // infer the brief deterministically to save quota and eliminate latency.
+  if (promptAlreadySpecific(prompt) || prompt.trim().split(/\s+/).length < 12) {
+    return buildDeterministicDesignBrief(prompt);
+  }
+
+  try {
+    return await withFreeFallbacks("design_brief", async (selection) => {
+      const { text } = await callTextModel({
+        model: selection.model,
+        prompt: buildDesignBriefPrompt(prompt),
+        timeoutMs: BRIEF_TIMEOUT_MS,
+        maxOutputTokens: 700,
+        temperature: 0.1,
+      });
+      return parseDesignBrief(text) ?? buildDeterministicDesignBrief(prompt);
+    });
+  } catch {
+    return buildDeterministicDesignBrief(prompt);
+  }
+}
+
+/**
+ * Assesses whether a user's prompt needs clarification.
+ */
+export async function assessClarification(
+  prompt: string,
+  references?: readonly DesignReference[],
+): Promise<ClarificationResult> {
+  const trimmed = prompt.trim();
+  if (promptAlreadySpecific(trimmed, references)) {
+    return { needsClarification: false };
+  }
+
+  // Prefer deterministic skip when no free clarify provider is configured
+  if (
+    !isProviderConfigured("google") &&
+    !isProviderConfigured("gateway") &&
+    !isProviderConfigured("openrouter") &&
+    !isProviderConfigured("nvidia")
   ) {
     return { needsClarification: false };
   }
 
-  // If NVIDIA is the active provider, use the tuned assessment helper
-  if (provider === "nvidia") {
-    return assessClarificationWithNvidia(prompt, CLARIFICATION_TIMEOUT_MS);
-  }
-
-  // Google or OpenRouter via Vercel AI SDK
-  if (!isProviderConfigured(provider)) {
-    return { needsClarification: false };
-  }
-
-  const systemPrompt = `You are Foundry's senior AI design architect.
-Analyze the user's prompt for building a website or web application.
-Determine if the prompt is broad or underspecified and would benefit from 2 to 3 high-impact multiple-choice clarification questions before generating code.
-
-If the prompt is ALREADY specific (e.g. contains specific section list, color scheme, and content copy), return:
-{
-  "needsClarification": false
-}
-
-If the prompt is broad (e.g., "Build a real estate website", "Create a SaaS landing page", "Portfolio for designer"), return:
-{
-  "needsClarification": true,
-  "questions": [
-    {
-      "id": "visual_direction",
-      "question": "What visual direction do you prefer?",
-      "isMultiSelect": false,
-      "options": [
-        { "id": "opt_luxury", "label": "Luxury & elegant (charcoal, gold accents)" },
-        { "id": "opt_minimal", "label": "Modern & minimal (whites, neutral slate)" },
-        { "id": "opt_warm", "label": "Warm & editorial (cream, earthy tones)" },
-        { "id": "opt_default", "label": "Let Foundry decide" }
-      ]
-    },
-    {
-      "id": "primary_focus",
-      "question": "What should the hero section emphasize?",
-      "isMultiSelect": false,
-      "options": [
-        { "id": "opt_search", "label": "Interactive search / calculator interface" },
-        { "id": "opt_visual", "label": "High-impact visual showcase" },
-        { "id": "opt_default", "label": "Let Foundry decide" }
-      ]
-    },
-    {
-      "id": "key_sections",
-      "question": "Which sections should be included?",
-      "isMultiSelect": true,
-      "options": [
-        { "id": "opt_features", "label": "Core features / showcase grid" },
-        { "id": "opt_testimonials", "label": "Client reviews & social proof" },
-        { "id": "opt_pricing", "label": "Pricing matrix or contact inquiry form" }
-      ]
-    }
-  ]
-}
-
-Important Rules:
-- Ask only 2 to 3 meaningful questions.
-- Tailor questions specifically to the domain of the user's prompt.
-- Do NOT ask questions about details the user already specified.
-- Options must be concise and easy to compare.
-- Reply ONLY with valid JSON.`;
-
   try {
-    const model = createLanguageModel(provider);
-    const { text } = await generateText({
-      model,
-      system: systemPrompt,
-      prompt: trimmed,
-      abortSignal: AbortSignal.timeout(CLARIFICATION_TIMEOUT_MS),
+    return await withFreeFallbacks("clarification", async (selection) => {
+      const { text } = await callTextModel({
+        model: selection.model,
+        system: buildClarificationSystemPrompt(),
+        prompt: trimmed,
+        timeoutMs: CLARIFICATION_TIMEOUT_MS,
+        maxOutputTokens: 800,
+        temperature: 0.1,
+      });
+      return extractClarificationOutput(text);
     });
-
-    return extractClarificationOutput(text);
   } catch {
     return { needsClarification: false };
   }
 }
 
 /**
- * Primary code generation function.
- * Routes to the configured provider (NVIDIA, Google Gemini, OpenRouter),
- * formats system prompts and design references, and extracts validated structured output.
+ * Primary code generation with automatic free-model routing.
  */
 export async function generateWebsite(
   options: GenerateWebsiteOptions,
 ): Promise<AIGenerationResult> {
-  const provider = resolveActiveProvider(options.provider);
   const startTime = Date.now();
+  const task = detectTask(options);
+  let retries = 0;
 
-  // If NVIDIA is the chosen provider, call the dedicated NVIDIA inference engine
-  if (provider === "nvidia") {
-    const result = await generateWebsiteWithNvidia(options);
-    if (result.success) {
-      return {
-        ...result,
-        provider: "nvidia",
-        model: options.model || DEFAULT_NVIDIA_MODEL,
-        latencyMs: Date.now() - startTime,
-      };
-    }
+  const designBrief =
+    options.designBrief ??
+    (task === "landing_page"
+      ? await deriveDesignBrief(options.prompt)
+      : (options.designBrief ?? null));
 
-    // Check if fallback to another configured provider is viable on retryable error
-    const isRetryable =
-      result.code === "RATE_LIMIT" || result.code === "PROVIDER_ERROR";
-    if (isRetryable) {
-      if (isProviderConfigured("google")) {
-        return generateWebsite({ ...options, provider: "google" });
-      } else if (isProviderConfigured("openrouter")) {
-        return generateWebsite({ ...options, provider: "openrouter" });
-      }
-    }
+  const mode = task === "landing_page" ? "full" : "edit";
+  const systemPrompt = buildGenerationSystemPrompt({
+    existingFiles: options.existingFiles,
+    references: options.references,
+    designBrief,
+    mode,
+  });
 
-    return {
-      ...result,
-      provider: "nvidia",
-      model: options.model || DEFAULT_NVIDIA_MODEL,
-    };
-  }
+  const userPrompt = composeBriefedUserPrompt(
+    options.prompt,
+    designBrief,
+    options.clarificationAnswers,
+  );
 
-  // Google or OpenRouter via Vercel AI SDK
-  const config = getProviderConfig(provider, options.model);
-  if (!config.apiKey) {
-    return {
-      success: false,
-      code: "CONFIG_ERROR",
-      provider,
-      model: config.modelId,
-      error: `API key for ${provider.toUpperCase()} is not configured in server environment.`,
-    };
-  }
+  // Keep conversation context bounded (last 4 turns max)
+  const previous = (options.previousMessages ?? [])
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(-4)
+    .map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content.slice(0, 4000),
+    }));
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   try {
-    const model = createLanguageModel(provider, config.modelId);
-    const systemPrompt = buildUnifiedSystemPrompt(
-      options.existingFiles,
-      options.references,
-    );
+    const result = await withFreeFallbacks(task, async (selection) => {
+      const modelId = resolveRegistryModelId(selection.model);
+      try {
+        const first = await callTextModel({
+          model: selection.model,
+          system: systemPrompt,
+          messages: [...previous, { role: "user", content: userPrompt }],
+          timeoutMs,
+          maxOutputTokens: selection.model.maxOutputTokens,
+          temperature: 0.2,
+        });
 
-    const messages: Array<{ role: "user" | "assistant"; content: string }> = [
-      ...(options.previousMessages ?? []).map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      })),
-      { role: "user", content: options.prompt },
-    ];
+        let structured;
+        try {
+          structured = extractStructuredOutput(first.text);
+        } catch (parseErr) {
+          retries += 1;
+          // One bounded repair attempt on the same free model
+          const repair = await callTextModel({
+            model: selection.model,
+            system: systemPrompt,
+            messages: [
+              { role: "user", content: userPrompt },
+              { role: "assistant", content: first.text.slice(0, 12000) },
+              {
+                role: "user",
+                content: `${JSON_REPAIR_INSTRUCTION}\nParse error: ${
+                  parseErr instanceof Error ? parseErr.message : "invalid JSON"
+                }`,
+              },
+            ],
+            timeoutMs: Math.min(timeoutMs, 90_000),
+            maxOutputTokens: selection.model.maxOutputTokens,
+            temperature: 0,
+          });
+          structured = extractStructuredOutput(repair.text);
+          return {
+            structured,
+            usage: repair.usage,
+            selection,
+            modelId,
+          };
+        }
 
-    const { text, usage } = await generateText({
-      model,
-      system: systemPrompt,
-      messages,
-      temperature: 0.2,
-      abortSignal: AbortSignal.timeout(timeoutMs),
+        return {
+          structured,
+          usage: first.usage,
+          selection,
+          modelId,
+        };
+      } catch (error) {
+        const msg =
+          error instanceof Error
+            ? redactSecrets(error.message)
+            : "Provider error";
+        const code = classifyError(msg) ?? "PROVIDER_ERROR";
+        throw Object.assign(new Error(msg), {
+          code,
+          provider: selection.model.provider,
+          model: modelId,
+        });
+      }
     });
-
-    let structuredOutput;
-    try {
-      structuredOutput = extractStructuredOutput(text);
-    } catch (parseErr) {
-      return {
-        success: false,
-        code: "MALFORMED_OUTPUT",
-        provider,
-        model: config.modelId,
-        error:
-          parseErr instanceof Error
-            ? redactSecrets(parseErr.message)
-            : "Failed to parse model output into structured files.",
-      };
-    }
 
     return {
       success: true,
-      output: structuredOutput,
-      provider,
-      model: config.modelId,
-      latencyMs: Date.now() - startTime,
-      usage: {
-        promptTokens: usage?.inputTokens,
-        completionTokens: usage?.outputTokens,
+      output: {
+        ...result.structured,
+        designBriefText:
+          typeof designBrief === "object" && designBrief
+            ? JSON.stringify(designBrief)
+            : undefined,
       },
+      provider: result.selection.model.provider,
+      model: result.modelId,
+      latencyMs: Date.now() - startTime,
+      retries,
+      routeReason: result.selection.reason,
+      designBrief,
+      usage: result.usage,
     };
   } catch (err) {
     const errorMsg =
       err instanceof Error ? redactSecrets(err.message) : "Unknown AI error.";
+    const code: GenerationErrorCode =
+      (err as { code?: GenerationErrorCode }).code ||
+      classifyError(errorMsg) ||
+      "PROVIDER_ERROR";
 
-    if (
-      /api key not valid/i.test(errorMsg) ||
-      /invalid api key/i.test(errorMsg) ||
-      /api_key_invalid/i.test(errorMsg)
-    ) {
-      const envVarName =
-        provider === "google"
-          ? "GOOGLE_GENERATIVE_AI_API_KEY"
-          : provider === "openrouter"
-            ? "OPENROUTER_API_KEY"
-            : "NVIDIA_API_KEY";
+    if (code === "NO_FREE_PROVIDER") {
       return {
         success: false,
-        code: "CONFIG_ERROR",
-        provider,
-        model: config.modelId,
-        error: `Invalid API key for ${provider.toUpperCase()}. Please check ${envVarName} in your .env.local file.`,
-      };
-    }
-
-    if (errorMsg.includes("429") || /rate[- ]limit/i.test(errorMsg)) {
-      return {
-        success: false,
-        code: "RATE_LIMIT",
-        provider,
-        model: config.modelId,
-        error: `${provider.toUpperCase()} rate limit reached. Please wait a moment before retrying.`,
-      };
-    }
-
-    if (errorMsg.includes("timeout") || /timed?[- ]?out/i.test(errorMsg)) {
-      return {
-        success: false,
-        code: "TIMEOUT",
-        provider,
-        model: config.modelId,
-        error: `Generation timed out after ${Math.round(timeoutMs / 1000)} seconds.`,
+        code: "NO_FREE_PROVIDER",
+        error: errorMsg,
+        latencyMs: Date.now() - startTime,
+        retries,
       };
     }
 
     return {
       success: false,
-      code: "PROVIDER_ERROR",
-      provider,
-      model: config.modelId,
+      code,
       error: errorMsg,
+      provider: (err as { provider?: string }).provider,
+      model: (err as { model?: string }).model,
+      latencyMs: Date.now() - startTime,
+      retries,
     };
   }
 }

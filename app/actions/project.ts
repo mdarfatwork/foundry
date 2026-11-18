@@ -396,22 +396,24 @@ export async function getProjectFilesAction(
             if (
               !currentNext ||
               typeof currentNext !== "string" ||
-              currentNext.startsWith("16.") ||
-              currentNext.startsWith("^16") ||
-              currentNext.startsWith("~16")
+              currentNext.startsWith("15.")
             ) {
               parsed.dependencies = parsed.dependencies || {};
-              parsed.dependencies["next"] = "15.3.9";
+              parsed.dependencies["next"] = "16.4.6";
               if (parsed.devDependencies?.["next"]) {
                 delete parsed.devDependencies["next"];
               }
               pkgModified = true;
             }
-            if (parsed.scripts?.dev && typeof parsed.scripts.dev === "string") {
-              if (parsed.scripts.dev.includes("--webpack")) {
-                parsed.scripts.dev =
-                  parsed.scripts.dev.replace(/\s*--webpack\b/g, "").trim() ||
-                  "next dev";
+            if (parsed.scripts && typeof parsed.scripts === "object") {
+              if (
+                !parsed.scripts.dev ||
+                typeof parsed.scripts.dev !== "string"
+              ) {
+                parsed.scripts.dev = "next dev --webpack";
+                pkgModified = true;
+              } else if (!parsed.scripts.dev.includes("--webpack")) {
+                parsed.scripts.dev = `${parsed.scripts.dev} --webpack`.trim();
                 pkgModified = true;
               }
             }

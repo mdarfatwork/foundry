@@ -1,9 +1,11 @@
 /**
  * Core types for AI code generation, multi-provider inference, and clarification in Foundry.
- * Adheres to AGENTS.md §5.2, §5.3, and Prompt §4, §5, §6.
  */
 
-export type AIProvider = "nvidia" | "google" | "openrouter";
+import type { AIProviderId } from "./registry";
+import type { DesignBrief } from "./schemas";
+
+export type AIProvider = AIProviderId;
 
 export type UrlReference = {
   readonly type: "url";
@@ -32,6 +34,7 @@ export type GenerationOutput = {
   readonly summary: string;
   readonly details: readonly string[];
   readonly files: readonly FileModification[];
+  readonly designBriefText?: string;
 };
 
 export type AIModelMessage = {
@@ -71,15 +74,36 @@ export type ClarificationResult =
       readonly needsClarification: false;
     };
 
+export type GenerationTask =
+  | "clarification"
+  | "design_brief"
+  | "landing_page"
+  | "follow_up_edit"
+  | "error_repair";
+
 export type GenerateWebsiteOptions = {
   readonly prompt: string;
   readonly existingFiles: readonly FileModification[];
   readonly previousMessages?: readonly AIModelMessage[];
   readonly references?: readonly DesignReference[];
+  /** @deprecated Ignored — routing is automatic and free-only. */
   readonly provider?: AIProvider;
+  /** @deprecated Ignored — routing is automatic and free-only. */
   readonly model?: string;
   readonly timeoutMs?: number;
+  readonly designBrief?: DesignBrief | null;
+  readonly task?: GenerationTask;
+  readonly clarificationAnswers?: string;
 };
+
+export type GenerationErrorCode =
+  | "TIMEOUT"
+  | "RATE_LIMIT"
+  | "CONFIG_ERROR"
+  | "PROVIDER_ERROR"
+  | "MALFORMED_OUTPUT"
+  | "VALIDATION_FAILED"
+  | "NO_FREE_PROVIDER";
 
 export type AIGenerationResult =
   | {
@@ -88,6 +112,9 @@ export type AIGenerationResult =
       readonly provider?: AIProvider | string;
       readonly model?: string;
       readonly latencyMs?: number;
+      readonly retries?: number;
+      readonly routeReason?: string;
+      readonly designBrief?: DesignBrief | null;
       readonly usage?: {
         readonly promptTokens?: number;
         readonly completionTokens?: number;
@@ -97,15 +124,11 @@ export type AIGenerationResult =
   | {
       readonly success: false;
       readonly error: string;
-      readonly code:
-        | "TIMEOUT"
-        | "RATE_LIMIT"
-        | "CONFIG_ERROR"
-        | "PROVIDER_ERROR"
-        | "MALFORMED_OUTPUT"
-        | "VALIDATION_FAILED";
+      readonly code: GenerationErrorCode;
       readonly provider?: AIProvider | string;
       readonly model?: string;
+      readonly latencyMs?: number;
+      readonly retries?: number;
     };
 
 export type ValidationResult =

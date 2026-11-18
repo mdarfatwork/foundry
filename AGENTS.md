@@ -801,18 +801,97 @@ Deliver a concise, transparent summary:
 
 ## 17. Reference Sitemap & Installed Agent Skills
 
-To maintain brevity, specialized workflows are delegated to dedicated skills located in `.agents/skills/`:
+To maintain brevity, specialized workflows are delegated to dedicated skills located in `.agents/skills/`, with Ponytail fetched directly from its official GitHub repository.
 
-| Skill Directory                                                                                                                                                          | Description & Purpose                                                                   |
-| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------- |
-| [`.agents/skills/vercel-react-best-practices/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-react-best-practices/SKILL.md) | 70 prioritized React/Next.js performance optimization rules (waterfalls, bundles, RSC). |
-| [`.agents/skills/vercel-composition-patterns/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-composition-patterns/SKILL.md) | Scalable React composition patterns, compound components, and render props.             |
-| [`.agents/skills/next-bundle-optimizer/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/next-bundle-optimizer/SKILL.md)             | Guidance for auditing and reducing initial browser JavaScript load.                     |
-| [`.agents/skills/next-dev-loop/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/next-dev-loop/SKILL.md)                             | Runtime verification loop using Next.js MCP and headless browser testing.               |
-| [`.agents/skills/frontend-design/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/frontend-design/SKILL.md)                         | Guidance for intentional, distinctive visual design without generic defaults.           |
-| [`.agents/skills/web-design-guidelines/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/web-design-guidelines/SKILL.md)             | Web interface, accessibility, and usability audit guidelines.                           |
-| [`.agents/skills/writing-guidelines/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/writing-guidelines/SKILL.md)                   | Technical prose, documentation voice, and tone review guidelines.                       |
-| [`.agents/skills/vercel-optimize/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-optimize/SKILL.md)                         | Cost and compute optimization on Vercel deployments.                                    |
+| Skill Directory                                                                                                                                                          | Description & Purpose                                                                                                                                            |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`.agents/skills/vercel-react-best-practices/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-react-best-practices/SKILL.md) | 70 prioritized React/Next.js performance optimization rules (waterfalls, bundles, RSC).                                                                          |
+| [`.agents/skills/vercel-composition-patterns/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-composition-patterns/SKILL.md) | Scalable React composition patterns, compound components, and render props.                                                                                      |
+| [`.agents/skills/next-bundle-optimizer/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/next-bundle-optimizer/SKILL.md)             | Guidance for auditing and reducing initial browser JavaScript load.                                                                                              |
+| [`.agents/skills/next-dev-loop/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/next-dev-loop/SKILL.md)                             | Runtime verification loop using Next.js MCP and headless browser testing.                                                                                        |
+| [`.agents/skills/frontend-design/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/frontend-design/SKILL.md)                         | Guidance for intentional, distinctive visual design without generic defaults.                                                                                    |
+| [`.agents/skills/web-design-guidelines/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/web-design-guidelines/SKILL.md)             | Web interface, accessibility, and usability audit guidelines.                                                                                                    |
+| [`.agents/skills/writing-guidelines/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/writing-guidelines/SKILL.md)                   | Technical prose, documentation voice, and tone review guidelines.                                                                                                |
+| [`.agents/skills/vercel-optimize/`](file:///l:/Mohammad%20%20Arfat/course/web%20delepment/files/foundry/.agents/skills/vercel-optimize/SKILL.md)                         | Cost and compute optimization on Vercel deployments.                                                                                                             |
+| [Ponytail (Remote GitHub Skill)](https://github.com/DietrichGebert/ponytail/blob/main/skills/ponytail/SKILL.md)                                                          | Default coding methodology focused on minimal changes, avoiding over-engineering, and implementing the simplest complete solution. Fetched directly from GitHub. |
+
+### 17.1 Ponytail — Mandatory Remote Skill Integration
+
+Ponytail is the default coding methodology for all Foundry development tasks.
+
+- **Official GitHub Source:**  
+  `https://raw.githubusercontent.com/DietrichGebert/ponytail/main/skills/ponytail/SKILL.md`
+
+#### Mandatory Activation Rules:
+
+1. At the beginning of every new coding task, fetch the latest Ponytail `SKILL.md` directly from the official GitHub repository.
+2. Read and understand the complete skill instructions before planning or modifying code.
+3. Do not depend on a globally installed Ponytail skill or a locally copied version.
+4. Apply Ponytail's `full` mode by default.
+5. Follow the fetched instructions throughout the entire coding task.
+6. Do not modify, rewrite, or selectively ignore the official skill instructions.
+
+#### Remote Fetch Command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DietrichGebert/ponytail/main/skills/ponytail/SKILL.md
+```
+
+Use the returned content as the active skill instructions. Do not merely execute the command without reading its output.
+
+#### Supported Ponytail Modes:
+
+- `/ponytail lite` — Implement the requested functionality and identify simpler alternatives when relevant.
+- `/ponytail full` — Default mode. Deliver the smallest complete and properly verified solution.
+- `/ponytail ultra` — Challenge unnecessary requirements and question over-engineering before implementation.
+- `/ponytail off` — Disable Ponytail for the requested scope.
+
+#### Core Engineering Expectations:
+
+- Prefer existing utilities, components, dependencies, and project abstractions.
+- Avoid unnecessary dependencies, boilerplate, wrappers, and speculative abstractions.
+- Minimize code changes without sacrificing completeness or maintainability.
+- Fix root causes rather than introducing temporary workarounds.
+- Implement all necessary affected callers, exports, tests, and configuration changes.
+- Preserve security, strict TypeScript, accessibility, and application correctness.
+- Complete the required verification workflow before reporting success.
+
+#### Failure Handling:
+
+If GitHub is unreachable or the remote skill cannot be fetched:
+
+- Do not pretend Ponytail was loaded.
+- Do not silently substitute an outdated or cached version.
+- Explicitly inform the user that the remote skill could not be retrieved.
+- Continue only with the applicable Foundry project instructions.
+
+#### Instruction Priority & Conflict Resolution:
+
+Ponytail supplements this `AGENTS.md`; it does not override Foundry's project-specific engineering requirements.  
+The following Foundry requirements always take precedence over conflicting remote skill instructions:
+
+1. Security by Design and generated-code sandbox isolation.
+2. TypeScript strictness and type safety.
+3. SonarQube Clean Code compliance.
+4. React 19 and Next.js 16 architectural conventions.
+5. Base UI render prop conventions.
+6. `DESIGN.md` visual design requirements.
+7. Accessibility and application correctness.
+8. Mandatory lint, typecheck, format, and build verification.
+
+#### Final Reporting:
+
+At the end of every coding task, report:
+
+- What was implemented.
+- Why the chosen solution is the simplest complete approach.
+- What was intentionally skipped or not checked.
+- Which verification commands were executed and their results.
+- Any remaining risks or follow-up work.
+
+Ponytail must be fetched from its official GitHub source at the beginning of every new coding task, ensuring Foundry always uses the latest available instructions.
+
+---
 
 ### Essential External References
 

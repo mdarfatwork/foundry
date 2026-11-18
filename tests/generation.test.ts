@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   generateProjectCodeAction,
   submitClarificationAnswersAction,
+  repairProjectCodeAction,
 } from "@/app/actions/generation";
 import {
   getProjectFilesAction,
@@ -9,7 +10,7 @@ import {
 } from "@/app/actions/project";
 import * as sessionModule from "@/lib/auth/session";
 import * as projectActionsModule from "@/app/actions/project";
-import * as nvidiaModule from "@/lib/ai/nvidia";
+import * as unifiedAiModule from "@/lib/ai/unified";
 
 describe("Generation & Project Persistence Actions", () => {
   const mockUserAlice = {
@@ -113,22 +114,20 @@ describe("Generation & Project Persistence Actions", () => {
         mockProjectAlice,
       );
 
-      vi.spyOn(nvidiaModule, "assessClarificationWithNvidia").mockResolvedValue(
-        {
-          needsClarification: true,
-          questions: [
-            {
-              id: "visual_direction",
-              question: "What visual direction do you prefer?",
-              isMultiSelect: false,
-              options: [
-                { id: "opt_luxury", label: "Luxury & elegant" },
-                { id: "opt_minimal", label: "Modern & minimal" },
-              ],
-            },
-          ],
-        },
-      );
+      vi.spyOn(unifiedAiModule, "assessClarification").mockResolvedValue({
+        needsClarification: true,
+        questions: [
+          {
+            id: "visual_direction",
+            question: "What visual direction do you prefer?",
+            isMultiSelect: false,
+            options: [
+              { id: "opt_luxury", label: "Luxury & elegant" },
+              { id: "opt_minimal", label: "Modern & minimal" },
+            ],
+          },
+        ],
+      });
 
       const res = await generateProjectCodeAction(
         "proj_alice_1",
@@ -151,9 +150,9 @@ describe("Generation & Project Persistence Actions", () => {
         mockProjectAlice,
       );
 
-      const assessSpy = vi.spyOn(nvidiaModule, "assessClarificationWithNvidia");
+      const assessSpy = vi.spyOn(unifiedAiModule, "assessClarification");
 
-      vi.spyOn(nvidiaModule, "generateWebsiteWithNvidia").mockResolvedValue({
+      vi.spyOn(unifiedAiModule, "generateWebsite").mockResolvedValue({
         success: true,
         output: {
           summary: "Generated real estate page",
@@ -188,7 +187,7 @@ describe("Generation & Project Persistence Actions", () => {
       );
 
       const generateSpy = vi
-        .spyOn(nvidiaModule, "generateWebsiteWithNvidia")
+        .spyOn(unifiedAiModule, "generateWebsite")
         .mockResolvedValue({
           success: true,
           output: {
@@ -269,13 +268,11 @@ describe("Generation & Project Persistence Actions", () => {
         mockProjectAlice,
       );
 
-      vi.spyOn(nvidiaModule, "assessClarificationWithNvidia").mockResolvedValue(
-        {
-          needsClarification: false,
-        },
-      );
+      vi.spyOn(unifiedAiModule, "assessClarification").mockResolvedValue({
+        needsClarification: false,
+      });
 
-      vi.spyOn(nvidiaModule, "generateWebsiteWithNvidia").mockResolvedValue({
+      vi.spyOn(unifiedAiModule, "generateWebsite").mockResolvedValue({
         success: false,
         code: "TIMEOUT",
         error: "Generation timed out after 300 seconds.",
@@ -299,13 +296,11 @@ describe("Generation & Project Persistence Actions", () => {
         mockProjectAlice,
       );
 
-      vi.spyOn(nvidiaModule, "assessClarificationWithNvidia").mockResolvedValue(
-        {
-          needsClarification: false,
-        },
-      );
+      vi.spyOn(unifiedAiModule, "assessClarification").mockResolvedValue({
+        needsClarification: false,
+      });
 
-      vi.spyOn(nvidiaModule, "generateWebsiteWithNvidia").mockResolvedValue({
+      vi.spyOn(unifiedAiModule, "generateWebsite").mockResolvedValue({
         success: true,
         output: {
           summary: "Added database query",
@@ -329,6 +324,53 @@ describe("Generation & Project Persistence Actions", () => {
       if (!res.success) {
         expect(res.code).toBe("VALIDATION_FAILED");
         expect(res.error).toContain("prohibited server patterns");
+      }
+    });
+  });
+
+  describe("Autonomous Self-Repair Action", () => {
+    it("repairs code when compilation or runtime errors occur", async () => {
+      vi.spyOn(sessionModule, "requireUser").mockResolvedValue(mockUserAlice);
+      vi.spyOn(projectActionsModule, "getProjectByIdForUser").mockResolvedValue(
+        mockProjectAlice,
+      );
+
+      const generateSpy = vi
+        .spyOn(unifiedAiModule, "generateWebsite")
+        .mockResolvedValue({
+          success: true,
+          provider: "google",
+          model: "gemini-3.5-flash-lite",
+          latencyMs: 1200,
+          output: {
+            summary: "Fixed missing import in navbar component",
+            details: ["Added missing lucide-react import"],
+            files: [
+              {
+                path: "app/page.tsx",
+                content: "export default function Page() { return <div />; }",
+              },
+              {
+                path: "components/sections/navbar.tsx",
+                content:
+                  "import { Menu } from 'lucide-react'; export function Navbar() { return <nav><Menu /></nav>; }",
+              },
+            ],
+          },
+        });
+
+      const res = await repairProjectCodeAction(
+        "proj_alice_1",
+        "Module not found: Can't resolve 'lucide-react' in './components/sections/navbar.tsx'",
+      );
+
+      expect(res.success).toBe(true);
+      if (res.success && res.data.type === "generated") {
+        expect(res.data.summary).toContain("Fixed missing import");
+        expect(res.data.updatedFiles).toHaveLength(2);
+        expect(generateSpy).toHaveBeenCalled();
+        const callArgs = generateSpy.mock.calls[0][0];
+        expect(callArgs.prompt).toContain("Module not found");
       }
     });
   });

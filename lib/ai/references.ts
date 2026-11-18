@@ -268,6 +268,33 @@ export const CURATED_UNSPLASH_ASSETS = {
       aspect: "16/9",
     },
   ],
+  luxuryInterior: [
+    {
+      url: "https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?auto=format&fit=crop&w=1200&q=80",
+      alt: "Minimalist luxury living room with neutral warm tones and premium furniture",
+      aspect: "16/9",
+    },
+    {
+      url: "https://images.unsplash.com/photo-1555041469-a586c61ea9bc?auto=format&fit=crop&w=1200&q=80",
+      alt: "Modern luxury sofa in elegant architectural showroom interior",
+      aspect: "16/9",
+    },
+    {
+      url: "https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?auto=format&fit=crop&w=1200&q=80",
+      alt: "Warm walnut and ivory interior dining and lounge setting",
+      aspect: "16/9",
+    },
+    {
+      url: "https://images.unsplash.com/photo-1586023492125-27b2c045efd7?auto=format&fit=crop&w=1200&q=80",
+      alt: "Minimalist designer armchair highlighting artisanal craftsmanship",
+      aspect: "4/3",
+    },
+    {
+      url: "https://images.unsplash.com/photo-1616046229478-9901c5536a45?auto=format&fit=crop&w=1200&q=80",
+      alt: "High-end interior showroom exhibition with ambient lighting",
+      aspect: "16/9",
+    },
+  ],
   modernArchitecture: [
     {
       url: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80",

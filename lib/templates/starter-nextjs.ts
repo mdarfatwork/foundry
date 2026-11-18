@@ -1,3 +1,5 @@
+import { FOUNDRY_DIAGNOSTIC_BRIDGE_SCRIPT } from "@/lib/verification/bridge-script";
+
 /**
  * Reusable starter template definition for Foundry projects.
  * Next.js 16 + React 19 + Tailwind CSS v4 + Base UI (shadcn base-nova).
@@ -5,7 +7,7 @@
  */
 
 export const STARTER_TEMPLATE_ID = "nextjs-shadcn-v1";
-export const STARTER_NEXT_VERSION = "15.3.9";
+export const STARTER_NEXT_VERSION = "16.4.6";
 export const STARTER_REACT_VERSION = "19.3.0";
 export const STARTER_BASE_UI_VERSION = "^1.9.0";
 
@@ -32,10 +34,11 @@ export function getStarterTemplateFiles(
           version: "0.1.0",
           private: true,
           scripts: {
-            dev: "next dev",
-            build: "next build",
+            dev: "next dev --webpack",
+            build: "next build --webpack",
             start: "next start",
             lint: "eslint",
+            typecheck: "tsc --noEmit",
           },
           dependencies: {
             "@base-ui/react": "^1.9.0",
@@ -43,7 +46,7 @@ export function getStarterTemplateFiles(
             cn: "^0.5.0",
             "lucide-react": "^1.62.0",
             motion: "^12.0.0",
-            next: "15.3.9",
+            next: "16.4.6",
             "next-themes": "^0.4.6",
             react: "19.3.0",
             "react-dom": "19.3.0",
@@ -54,6 +57,8 @@ export function getStarterTemplateFiles(
             "@types/node": "^20",
             "@types/react": "^19",
             "@types/react-dom": "^19",
+            eslint: "^9",
+            "eslint-config-next": "16.4.6",
             postcss: "^8",
             tailwindcss: "^4",
             typescript: "^5",
@@ -114,6 +119,21 @@ export default nextConfig;
     "@tailwindcss/postcss": {},
   },
 };
+`,
+    },
+    {
+      path: "eslint.config.mjs",
+      content: `import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  globalIgnores([".next/**", "node_modules/**", "out/**", "build/**"]),
+]);
+
+export default eslintConfig;
 `,
     },
     {
@@ -241,6 +261,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: ${JSON.stringify(FOUNDRY_DIAGNOSTIC_BRIDGE_SCRIPT)},
+          }}
+        />
+      </head>
       <body className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-foreground selection:text-background">
         {children}
       </body>

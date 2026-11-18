@@ -286,7 +286,39 @@ export const runtimeLog = pgTable(
   ],
 );
 
-// 12. Relational Mappings (Drizzle Relational Queries)
+// 12. Verification Runs Table (Tracks static, build, runtime, and smoke verification cycles)
+export const verificationRun = pgTable(
+  "verification_run",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    generationJobId: text("generation_job_id"),
+    runtimeSessionId: text("runtime_session_id"),
+    status: text("status").notNull(), // "running" | "verified" | "verified_with_warnings" | "failed"
+    stage: text("stage").notNull(), // "files" | "dependencies" | "typecheck" | "lint" | "build" | "runtime" | "complete"
+    errorCount: integer("error_count").notNull().default(0),
+    warningCount: integer("warning_count").notNull().default(0),
+    diagnostics: text("diagnostics"), // JSON serialized array of VerificationDiagnostic
+    stageMetrics: text("stage_metrics"), // JSON serialized duration per stage
+    repairAttempts: integer("repair_attempts").notNull().default(0),
+    repairSuccess: boolean("repair_success"),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("verification_run_project_id_idx").on(table.projectId),
+    index("verification_run_status_idx").on(table.status),
+  ],
+);
+
+// 13. Relational Mappings (Drizzle Relational Queries)
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
@@ -319,6 +351,7 @@ export const projectRelations = relations(project, ({ one, many }) => ({
   generationJobs: many(generationJob),
   versions: many(projectVersion),
   runtimeLogs: many(runtimeLog),
+  verificationRuns: many(verificationRun),
 }));
 
 export const projectFileRelations = relations(projectFile, ({ one }) => ({
@@ -375,6 +408,16 @@ export const runtimeLogRelations = relations(runtimeLog, ({ one }) => ({
   }),
 }));
 
+export const verificationRunRelations = relations(
+  verificationRun,
+  ({ one }) => ({
+    project: one(project, {
+      fields: [verificationRun.projectId],
+      references: [project.id],
+    }),
+  }),
+);
+
 // Inferred TypeScript Types
 export type User = typeof user.$inferSelect;
 export type NewUser = typeof user.$inferInsert;
@@ -398,3 +441,5 @@ export type ProjectVersion = typeof projectVersion.$inferSelect;
 export type NewProjectVersion = typeof projectVersion.$inferInsert;
 export type RuntimeLog = typeof runtimeLog.$inferSelect;
 export type NewRuntimeLog = typeof runtimeLog.$inferInsert;
+export type VerificationRun = typeof verificationRun.$inferSelect;
+export type NewVerificationRun = typeof verificationRun.$inferInsert;
