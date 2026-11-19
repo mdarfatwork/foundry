@@ -10,6 +10,7 @@ import type {
   FileModification,
   GenerationOutput,
 } from "./types";
+import { validateSourceIntegrity } from "./syntax-validator";
 
 /**
  * Provider-independent JSON extraction, Zod validation, and one-shot repair helpers.
@@ -118,7 +119,10 @@ export function extractFilesFromMalformedJson(rawText: string): {
 
     const trimmedCode = rawCode.trim();
     if (trimmedCode.length > 20) {
-      files.push({ path: filePath, content: trimmedCode });
+      const integrity = validateSourceIntegrity(filePath, trimmedCode);
+      if (integrity.valid) {
+        files.push({ path: filePath, content: trimmedCode });
+      }
     }
   }
 

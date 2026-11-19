@@ -53,6 +53,7 @@ import {
   repairVerificationErrorsAction,
 } from "@/app/actions/verification";
 import { runtimeManager } from "@/lib/webcontainer/runtime-manager";
+import { computeFileTreeHash } from "@/lib/crypto-hash";
 import { cn } from "@/lib/utils";
 
 type ViewportMode = "desktop" | "tablet" | "mobile";
@@ -188,9 +189,7 @@ export function WorkspaceCanvas({
   useEffect(() => {
     if (!isSupported || normalizedFiles.length === 0) return;
 
-    const currentFilesKey = normalizedFiles
-      .map((f) => `${f.path}:${f.content.length}`)
-      .join("|");
+    const currentFilesKey = computeFileTreeHash(normalizedFiles);
 
     // Case 1: First mount or project changed -> start workspace
     if (activeSlugRef.current !== slug) {
@@ -251,9 +250,7 @@ export function WorkspaceCanvas({
   const executeVerification = useCallback(async () => {
     if (isVerifyingRef.current || normalizedFiles.length === 0) return;
 
-    const filesKey = normalizedFiles
-      .map((f) => `${f.path}:${f.content.length}`)
-      .join("|");
+    const filesKey = computeFileTreeHash(normalizedFiles);
 
     // Avoid redundant verification if this exact set of files was already verified
     if (

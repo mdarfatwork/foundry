@@ -16,6 +16,7 @@ import {
   buildGenerationSystemPrompt,
   composeBriefedUserPrompt,
   inferRecipeFromPrompt,
+  extractRequestedSectionsFromPrompt,
 } from "./prompts";
 import {
   markProviderCooldown,
@@ -225,7 +226,7 @@ export function buildDeterministicDesignBrief(prompt: string): DesignBrief {
     palette:
       "Business-specific semantic OKLCH tokens; no purple gradient defaults",
     imagery: "Relevant Unsplash photography matching the trade or product",
-    sections: ["hero", "features", "proof-or-work", "cta", "footer"],
+    sections: extractRequestedSectionsFromPrompt(prompt),
     interactions: "Subtle motion on CTA/hero only; respect reduced motion",
   };
 }

@@ -30,7 +30,8 @@ export type DiagnosticSource =
   | "react_warning"
   | "runtime_exception"
   | "network"
-  | "smoke_test";
+  | "smoke_test"
+  | "toolchain";
 
 export type VerificationDiagnostic = Readonly<{
   id: string;

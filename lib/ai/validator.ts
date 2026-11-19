@@ -1,5 +1,9 @@
 import { normalize } from "path/posix";
 import type { FileModification, ValidationResult } from "./types";
+import {
+  validateSourceIntegrity,
+  validatePageSectionComposition,
+} from "./syntax-validator";
 
 /**
  * Validates AI-generated file modifications before saving.
@@ -124,18 +128,51 @@ export function normalizeRelativePath(rawPath: string): string {
  * Validates an array of proposed file modifications.
  * Returns { valid: true, files: [...] } or { valid: false, error: "..." }.
  */
+export type ValidationOptions = {
+  readonly existingFiles?: readonly FileModification[];
+  readonly requiredSections?: readonly string[];
+  readonly minSections?: number;
+};
+
 /**
  * Deterministically synthesizes app/page.tsx when the model generated modular
  * section components (e.g. components/sections/*) but omitted the composition page.
+ * Merges existing section files with newly modified section files.
  */
 function synthesizePageFromSections(
-  files: readonly FileModification[],
+  newFiles: readonly FileModification[],
+  existingFiles: readonly FileModification[] = [],
 ): FileModification | null {
-  const sectionFiles = files.filter(
-    (f) =>
+  const mergedMap = new Map<string, FileModification>();
+  for (const f of existingFiles) {
+    if (
       f.path.startsWith("components/sections/") &&
-      (f.path.endsWith(".tsx") || f.path.endsWith(".jsx")),
-  );
+      (f.path.endsWith(".tsx") || f.path.endsWith(".jsx"))
+    ) {
+      mergedMap.set(f.path, f);
+    }
+  }
+  for (const f of newFiles) {
+    if (
+      f.path.startsWith("components/sections/") &&
+      (f.path.endsWith(".tsx") || f.path.endsWith(".jsx"))
+    ) {
+      mergedMap.set(f.path, f);
+    }
+  }
+
+  const sectionFiles = Array.from(mergedMap.values()).sort((a, b) => {
+    // Keep logical visual order: navbar/header first, hero second, footer last
+    const aLower = a.path.toLowerCase();
+    const bLower = b.path.toLowerCase();
+    if (aLower.includes("nav") || aLower.includes("header")) return -1;
+    if (bLower.includes("nav") || bLower.includes("header")) return 1;
+    if (aLower.includes("hero")) return -1;
+    if (bLower.includes("hero")) return 1;
+    if (aLower.includes("footer")) return 1;
+    if (bLower.includes("footer")) return -1;
+    return a.path.localeCompare(b.path);
+  });
 
   if (sectionFiles.length === 0) return null;
 
@@ -145,10 +182,13 @@ function synthesizePageFromSections(
   for (const sf of sectionFiles) {
     const importPath = `@/${sf.path.replace(/\.[^/.]+$/, "")}`;
     const defaultExportMatch = sf.content.match(
-      /export\s+default\s+(?:function\s+)?([A-Za-z0-9_]+)/,
+      /export\s+default\s+(?:function\s+|class\s+)?([A-Za-z0-9_]+)/,
     );
     const namedExportMatch = sf.content.match(
       /export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)/,
+    );
+    const constExportMatch = sf.content.match(
+      /export\s+const\s+([A-Za-z0-9_]+)/,
     );
 
     if (defaultExportMatch && defaultExportMatch[1]) {
@@ -159,16 +199,10 @@ function synthesizePageFromSections(
       const compName = namedExportMatch[1];
       imports.push(`import { ${compName} } from "${importPath}";`);
       componentUsages.push(`      <${compName} />`);
-    } else {
-      const base = sf.path
-        .split("/")
-        .pop()
-        ?.replace(/\.[^/.]+$/, "");
-      if (base) {
-        const compName = base.charAt(0).toUpperCase() + base.slice(1);
-        imports.push(`import ${compName} from "${importPath}";`);
-        componentUsages.push(`      <${compName} />`);
-      }
+    } else if (constExportMatch && constExportMatch[1]) {
+      const compName = constExportMatch[1];
+      imports.push(`import { ${compName} } from "${importPath}";`);
+      componentUsages.push(`      <${compName} />`);
     }
   }
 
@@ -193,6 +227,7 @@ ${componentUsages.join("\n")}
 
 export function validateGeneratedFiles(
   proposedFiles: readonly FileModification[],
+  options?: ValidationOptions,
 ): ValidationResult {
   if (!Array.isArray(proposedFiles)) {
     return {
@@ -312,7 +347,26 @@ export function validateGeneratedFiles(
       }
     }
 
-    // 8. Required entry point structure check
+    // 8. Structural code integrity & truncation check (TSX, TS, JSX, JS)
+    if (
+      normalizedPath.endsWith(".tsx") ||
+      normalizedPath.endsWith(".ts") ||
+      normalizedPath.endsWith(".jsx") ||
+      normalizedPath.endsWith(".js")
+    ) {
+      const integrity = validateSourceIntegrity(
+        normalizedPath,
+        sanitizedContent,
+      );
+      if (!integrity.valid) {
+        return {
+          valid: false,
+          error: integrity.error,
+        };
+      }
+    }
+
+    // 9. Required entry point structure check
     if (normalizedPath === "app/page.tsx") {
       if (!file.content.includes("export default")) {
         return {
@@ -337,11 +391,134 @@ export function validateGeneratedFiles(
   }
 
   // If section components were generated but app/page.tsx was omitted,
-  // deterministically synthesize app/page.tsx so the application renders cleanly.
+  // deterministically synthesize app/page.tsx using all available sections.
   if (!validatedFiles.some((f) => f.path === "app/page.tsx")) {
-    const synthesized = synthesizePageFromSections(validatedFiles);
+    const synthesized = synthesizePageFromSections(
+      validatedFiles,
+      options?.existingFiles,
+    );
     if (synthesized) {
       validatedFiles.unshift(synthesized);
+    }
+  }
+
+  // 10. Completeness & Import/Export Consistency Validation
+  const completeFileMap = new Map<string, string>();
+  if (options?.existingFiles) {
+    for (const ef of options.existingFiles) {
+      completeFileMap.set(ef.path, ef.content);
+    }
+  }
+  for (const vf of validatedFiles) {
+    completeFileMap.set(vf.path, vf.content);
+  }
+
+  const pageFile =
+    validatedFiles.find((f) => f.path === "app/page.tsx") ??
+    (completeFileMap.has("app/page.tsx")
+      ? { path: "app/page.tsx", content: completeFileMap.get("app/page.tsx")! }
+      : null);
+
+  if (pageFile) {
+    // Validate that all components imported from '@/components/...' actually exist
+    const importRegex =
+      /import\s+(?:(\w+)|\{([^}]+)\})\s+from\s+["']@\/([^"']+)["']/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = importRegex.exec(pageFile.content)) !== null) {
+      const defaultImport = match[1]?.trim();
+      const namedImports = match[2]
+        ? match[2].split(",").map((s) =>
+            s
+              .trim()
+              .split(/\s+as\s+/)[0]
+              .trim(),
+          )
+        : [];
+      const relPath = match[3];
+
+      // Exclude standard packages or ui/utils libraries
+      if (
+        relPath === "lib/utils" ||
+        relPath.startsWith("components/ui/") ||
+        relPath.startsWith("hooks/")
+      ) {
+        continue;
+      }
+
+      // Candidate file extensions
+      const candidates = [
+        `${relPath}.tsx`,
+        `${relPath}.ts`,
+        `${relPath}.jsx`,
+        `${relPath}.js`,
+        `${relPath}/index.tsx`,
+        `${relPath}/index.ts`,
+      ];
+
+      const targetPath = candidates.find((c) => completeFileMap.has(c));
+      if (!targetPath) {
+        return {
+          valid: false,
+          error: `Module not found in page composition: 'app/page.tsx' imports '@/${relPath}', but no matching file exists in the project.`,
+        };
+      }
+
+      const targetContent = completeFileMap.get(targetPath)!;
+
+      // Verify that default import exists
+      if (defaultImport && !/export\s+default\b/.test(targetContent)) {
+        return {
+          valid: false,
+          error: `Export mismatch: '${targetPath}' does not have a default export, but 'app/page.tsx' imports default '${defaultImport}'.`,
+        };
+      }
+
+      // Verify that named imports exist
+      for (const named of namedImports) {
+        if (!named) continue;
+        const namedRegex = new RegExp(
+          `export\\s+(?:(?:async\\s+)?function|const|class|type|interface)\\s+${named}\\b`,
+        );
+        const exportBlockRegex = new RegExp(`export\\s*\\{[^}]*\\b${named}\\b`);
+        if (
+          !namedRegex.test(targetContent) &&
+          !exportBlockRegex.test(targetContent)
+        ) {
+          return {
+            valid: false,
+            error: `Export mismatch: '${targetPath}' does not export '${named}', which is imported by 'app/page.tsx'.`,
+          };
+        }
+      }
+    }
+
+    // Verify required sections completeness if specified
+    if (options?.requiredSections && options.requiredSections.length > 0) {
+      const composition = validatePageSectionComposition(
+        pageFile.content,
+        options.requiredSections,
+      );
+
+      // If user requested many sections (e.g. 5+ or 10 sections) and more than half are missing
+      if (
+        !composition.valid &&
+        (options.requiredSections.length >= 4 ||
+          options.minSections !== undefined)
+      ) {
+        const threshold =
+          options.minSections ??
+          Math.ceil(options.requiredSections.length * 0.7);
+        const renderedCount =
+          options.requiredSections.length - composition.missingSections.length;
+
+        if (renderedCount < threshold) {
+          return {
+            valid: false,
+            error: `Section completeness check failed: 'app/page.tsx' renders only ${renderedCount} section(s), but ${options.requiredSections.length} sections were requested (${options.requiredSections.join(", ")}). Missing sections: ${composition.missingSections.join(", ")}.`,
+          };
+        }
+      }
     }
   }
 

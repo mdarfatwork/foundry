@@ -255,7 +255,10 @@ async function executeGeneration(
   }
 
   // 7. Validate AI Output Before Saving (Zero-Trust Sandbox Gate)
-  const validation = validateGeneratedFiles(aiResult.output.files);
+  const validation = validateGeneratedFiles(aiResult.output.files, {
+    existingFiles,
+    requiredSections: aiResult.designBrief?.sections,
+  });
   if (!validation.valid) {
     if (process.env.DATABASE_URL) {
       try {
@@ -372,11 +375,11 @@ async function executeGeneration(
           })
           .where(eq(generationJob.id, jobId));
 
-        // f. Update Project Status
+        // f. Update Project Status (generation complete; awaiting verification)
         await tx
           .update(project)
           .set({
-            generationStatus: "succeeded",
+            generationStatus: "generated",
             updatedAt: new Date(),
           })
           .where(eq(project.id, trimmedId));

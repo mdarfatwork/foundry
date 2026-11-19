@@ -11,6 +11,12 @@ import type {
 } from "./types";
 import { clientLogger } from "./logger";
 import { redactSensitiveText } from "@/lib/logging/redaction";
+import {
+  extractDependencyHash,
+  diffFileTrees,
+  computeDeterministicHash,
+  type FileRecordEntry,
+} from "@/lib/crypto-hash";
 
 /**
  * Singleton WebContainer Runtime Manager for Foundry.
@@ -161,6 +167,8 @@ export class WebContainerRuntimeManager {
   private bootPromise: Promise<WebContainer> | null = null;
   private devProcess: WebContainerProcess | null = null;
   private installProcess: WebContainerProcess | null = null;
+  private installPromise: Promise<boolean> | null = null;
+  private currentFilesSnapshot: FileRecordEntry[] = [];
   private activePackageManager: "npm" | "pnpm" = "npm";
   private listeners: Set<WebContainerListener> = new Set();
   private serverReadyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -540,16 +548,10 @@ export class WebContainerRuntimeManager {
   }
 
   /**
-   * Simple hash helper to detect whether package.json has meaningfully changed.
+   * Computes deterministic hash of text content.
    */
   private hashContent(content: string): string {
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash |= 0;
-    }
-    return String(hash);
+    return computeDeterministicHash(content);
   }
 
   /**
@@ -577,6 +579,10 @@ export class WebContainerRuntimeManager {
     try {
       const tree = buildFileSystemTree(normalizedFiles);
       await container.mount(tree);
+      this.currentFilesSnapshot = normalizedFiles.map((f) => ({
+        path: f.path.replace(/\\/g, "/").replace(/^\/+/, ""),
+        content: f.content,
+      }));
       this.appendLog(
         "[Foundry WebContainer] Files mounted to virtual workspace.",
         {
@@ -608,17 +614,26 @@ export class WebContainerRuntimeManager {
     files: readonly FileEntry[],
     forceInstall = false,
   ): Promise<boolean> {
+    // If an install is currently running, return the active promise so concurrent callers await the same execution
+    if (this.installPromise) {
+      this.appendLog(
+        `[Foundry WebContainer] ${this.activePackageManager} install is already running; awaiting completion.`,
+        {
+          level: "debug",
+          source: "installer",
+          eventType: "install_reused_inflight",
+        },
+      );
+      return this.installPromise;
+    }
+
     const container = await this.getWebContainer();
     const normalizedFiles = normalizeProjectFiles(files);
 
     const packageJsonFile = normalizedFiles.find(
       (f) => f.path === "package.json",
     );
-    const lockFile = normalizedFiles.find(
-      (f) => f.path === "package-lock.json" || f.path === "pnpm-lock.yaml",
-    );
-    const contentToHash = `${packageJsonFile?.content ?? ""}|${lockFile?.content ?? ""}`;
-    const currentHash = this.hashContent(contentToHash);
+    const currentHash = extractDependencyHash(packageJsonFile?.content ?? "");
 
     // Verify whether node_modules actually exists in the container filesystem
     let hasNodeModules = false;
@@ -629,7 +644,7 @@ export class WebContainerRuntimeManager {
       hasNodeModules = false;
     }
 
-    // Skip installation ONLY if not forced, node_modules actually exists on disk, and hash matches
+    // Skip installation ONLY if not forced, node_modules actually exists on disk, and dependency hash matches
     if (
       !forceInstall &&
       hasNodeModules &&
@@ -638,7 +653,7 @@ export class WebContainerRuntimeManager {
       this.stageMetrics.installSkipped = true;
       this.stageMetrics.installDurationMs = 0;
       this.appendLog(
-        `[Foundry WebContainer] Dependencies verified on virtual disk. Skipping ${this.activePackageManager} install.`,
+        `[Foundry WebContainer] Dependencies verified on virtual disk (${currentHash.slice(0, 8)}). Skipping ${this.activePackageManager} install.`,
         {
           level: "debug",
           source: "installer",
@@ -648,95 +663,124 @@ export class WebContainerRuntimeManager {
       return true;
     }
 
-    if (this.state.isInstalling) {
+    const installTask = (async (): Promise<boolean> => {
+      this.updateState({
+        status: "installing",
+        isInstalling: true,
+        error: null,
+        operationId: "install",
+      });
+
+      const pm = this.activePackageManager;
       this.appendLog(
-        `[Foundry WebContainer] ${this.activePackageManager} install is already in progress.`,
+        `[Foundry WebContainer] Running ${pm} install --prefer-offline...`,
         {
-          level: "warn",
+          level: "info",
           source: "installer",
-          eventType: "install_already_running",
+          eventType: "install_start",
+          operationId: "install",
+          details: { packageManager: pm },
         },
       );
-      return false;
-    }
 
-    this.updateState({
-      status: "installing",
-      isInstalling: true,
-      error: null,
-      operationId: "install",
-    });
-
-    const pm = this.activePackageManager;
-    this.appendLog(
-      `[Foundry WebContainer] Running ${pm} install --prefer-offline...`,
-      {
-        level: "info",
-        source: "installer",
-        eventType: "install_start",
-        operationId: "install",
-        details: { packageManager: pm },
-      },
-    );
-
-    // Bounded timeout for dependency installation
-    if (this.installTimer) {
-      clearTimeout(this.installTimer);
-    }
-    this.installTimer = setTimeout(() => {
-      if (this.state.isInstalling && this.installProcess) {
-        this.appendLog(
-          `[Foundry WebContainer] Installation timed out after ${INSTALL_TIMEOUT_MS / 1000}s. Terminating installer process...`,
-          {
-            level: "error",
-            source: "installer",
-            eventType: "install_timeout",
-            operationId: "install",
-          },
-        );
-        try {
-          this.installProcess.kill();
-        } catch {
-          // Ignore
-        }
-      }
-    }, INSTALL_TIMEOUT_MS);
-
-    try {
-      const args = ["install", "--prefer-offline", "--no-audit", "--no-fund"];
-      const process = await container.spawn(pm, args);
-      this.installProcess = process;
-
-      // Stream stdout/stderr
-      process.output.pipeTo(
-        new WritableStream({
-          write: (chunk) => {
-            this.appendLog(chunk, {
-              level: chunk.toLowerCase().includes("err") ? "warn" : "info",
-              source: "installer",
-              eventType: "install_output",
-              operationId: "install",
-            });
-          },
-        }),
-      );
-
-      const exitCode = await process.exit;
-      this.installProcess = null;
+      // Bounded timeout for dependency installation
       if (this.installTimer) {
         clearTimeout(this.installTimer);
-        this.installTimer = null;
       }
+      this.installTimer = setTimeout(() => {
+        if (this.state.isInstalling && this.installProcess) {
+          this.appendLog(
+            `[Foundry WebContainer] Installation timed out after ${INSTALL_TIMEOUT_MS / 1000}s. Terminating installer process...`,
+            {
+              level: "error",
+              source: "installer",
+              eventType: "install_timeout",
+              operationId: "install",
+            },
+          );
+          try {
+            this.installProcess.kill();
+          } catch {
+            // Ignore
+          }
+        }
+      }, INSTALL_TIMEOUT_MS);
 
-      if (exitCode !== 0) {
-        const errorMsg = `${pm} install failed with exit code ${exitCode}. Check terminal logs.`;
-        this.appendLog(`[Foundry WebContainer] ${errorMsg}`, {
+      try {
+        const args = ["install", "--prefer-offline", "--no-audit", "--no-fund"];
+        const process = await container.spawn(pm, args);
+        this.installProcess = process;
+
+        // Stream stdout/stderr
+        process.output.pipeTo(
+          new WritableStream({
+            write: (chunk) => {
+              this.appendLog(chunk, {
+                level: chunk.toLowerCase().includes("err") ? "warn" : "info",
+                source: "installer",
+                eventType: "install_output",
+                operationId: "install",
+              });
+            },
+          }),
+        );
+
+        const exitCode = await process.exit;
+        this.installProcess = null;
+        if (this.installTimer) {
+          clearTimeout(this.installTimer);
+          this.installTimer = null;
+        }
+
+        if (exitCode !== 0) {
+          const errorMsg = `${pm} install failed with exit code ${exitCode}. Check terminal logs.`;
+          this.appendLog(`[Foundry WebContainer] ${errorMsg}`, {
+            level: "error",
+            source: "installer",
+            eventType: "install_failure",
+            operationId: "install",
+            processExitCode: exitCode,
+            details: { exitCode },
+          });
+          this.updateState({
+            status: "failed",
+            error: errorMsg,
+            isInstalling: false,
+          });
+          return false;
+        }
+
+        this.appendLog(
+          `[Foundry WebContainer] Dependencies installed successfully via ${pm}.`,
+          {
+            level: "info",
+            source: "installer",
+            eventType: "install_success",
+            operationId: "install",
+            processExitCode: 0,
+          },
+        );
+        this.updateState({
+          isInstalling: false,
+          lastInstalledPackageJsonHash: currentHash,
+        });
+        return true;
+      } catch (err) {
+        this.installProcess = null;
+        if (this.installTimer) {
+          clearTimeout(this.installTimer);
+          this.installTimer = null;
+        }
+        const errorMsg =
+          err instanceof Error
+            ? err.message
+            : "Failed to run dependency installation.";
+        this.appendLog(`[Foundry WebContainer Install Error] ${errorMsg}`, {
           level: "error",
           source: "installer",
-          eventType: "install_failure",
+          eventType: "install_error",
           operationId: "install",
-          processExitCode: exitCode,
-          details: { exitCode },
+          details: { error: errorMsg },
         });
         this.updateState({
           status: "failed",
@@ -745,45 +789,13 @@ export class WebContainerRuntimeManager {
         });
         return false;
       }
+    })();
 
-      this.appendLog(
-        `[Foundry WebContainer] Dependencies installed successfully via ${pm}.`,
-        {
-          level: "info",
-          source: "installer",
-          eventType: "install_success",
-          operationId: "install",
-          processExitCode: 0,
-        },
-      );
-      this.updateState({
-        isInstalling: false,
-        lastInstalledPackageJsonHash: currentHash,
-      });
-      return true;
-    } catch (err) {
-      this.installProcess = null;
-      if (this.installTimer) {
-        clearTimeout(this.installTimer);
-        this.installTimer = null;
-      }
-      const errorMsg =
-        err instanceof Error
-          ? err.message
-          : "Failed to run dependency installation.";
-      this.appendLog(`[Foundry WebContainer Install Error] ${errorMsg}`, {
-        level: "error",
-        source: "installer",
-        eventType: "install_error",
-        operationId: "install",
-        details: { error: errorMsg },
-      });
-      this.updateState({
-        status: "failed",
-        error: errorMsg,
-        isInstalling: false,
-      });
-      return false;
+    this.installPromise = installTask;
+    try {
+      return await installTask;
+    } finally {
+      this.installPromise = null;
     }
   }
 
@@ -947,6 +959,35 @@ export class WebContainerRuntimeManager {
       if (this.serverReadyTimer) {
         clearTimeout(this.serverReadyTimer);
         this.serverReadyTimer = null;
+      }
+
+      // Check whether terminal output buffer contains compilation or fatal runtime errors
+      const hasCompileError =
+        /failed to compile/i.test(this.devServerOutputBuffer) ||
+        /syntaxerror/i.test(this.devServerOutputBuffer) ||
+        /unhandled runtime error/i.test(this.devServerOutputBuffer) ||
+        /cannot find module/i.test(this.devServerOutputBuffer) ||
+        /module not found/i.test(this.devServerOutputBuffer);
+
+      if (hasCompileError) {
+        this.appendLog(
+          `[Foundry WebContainer] Server opened port ${port}, but compilation errors were detected in output buffer. Preview cannot be marked ready.`,
+          {
+            level: "error",
+            source: "dev-server",
+            eventType: "compile_error_prevented_ready",
+            details: { port, url },
+          },
+        );
+        this.updateState({
+          status: "failed",
+          isServerRunning: true,
+          previewUrl: null,
+          port,
+          error:
+            "Development server reported compilation errors. Preview is not ready.",
+        });
+        return;
       }
 
       this.activePort = port;
@@ -1240,15 +1281,44 @@ export class WebContainerRuntimeManager {
     }
 
     const normalizedFiles = normalizeProjectFiles(updatedFiles);
-    let packageJsonChanged = false;
+    const normalizedEntries: FileRecordEntry[] = normalizedFiles.map((f) => ({
+      path: f.path.replace(/\\/g, "/").replace(/^\/+/, ""),
+      content: f.content,
+    }));
 
-    for (const file of normalizedFiles) {
-      const cleanPath = file.path.replace(/\\/g, "/").replace(/^\/+/, "");
-      if (cleanPath === "package.json") {
-        packageJsonChanged = true;
+    const diff = diffFileTrees(this.currentFilesSnapshot, normalizedEntries);
+
+    // If nothing changed, short-circuit
+    if (
+      diff.added.length === 0 &&
+      diff.changed.length === 0 &&
+      diff.removed.length === 0
+    ) {
+      return;
+    }
+
+    // 1. Delete removed files from WebContainer virtual filesystem
+    for (const removedFile of diff.removed) {
+      try {
+        await this.instance.fs.rm(removedFile.path, { recursive: true });
+        this.appendLog(
+          `[Foundry Sync] Deleted removed file ${removedFile.path}`,
+          {
+            level: "info",
+            source: "client",
+            eventType: "file_removed",
+            details: { path: removedFile.path },
+          },
+        );
+      } catch {
+        // Ignore if file doesn't exist
       }
+    }
 
-      // Ensure directory exists before writing file
+    // 2. Write added and changed files
+    const filesToWrite = [...diff.added, ...diff.changed];
+    for (const file of filesToWrite) {
+      const cleanPath = file.path;
       const dirIndex = cleanPath.lastIndexOf("/");
       if (dirIndex !== -1) {
         const dir = cleanPath.slice(0, dirIndex);
@@ -1281,14 +1351,25 @@ export class WebContainerRuntimeManager {
       }
     }
 
-    // If package.json was modified, trigger dependency check & reinstall
-    if (packageJsonChanged) {
+    // 3. Check if dependencies changed (isolate package.json dependencies)
+    const prevPkg = this.currentFilesSnapshot.find(
+      (f) => f.path === "package.json",
+    );
+    const newPkg = normalizedEntries.find((f) => f.path === "package.json");
+    const prevDepHash = extractDependencyHash(prevPkg?.content ?? "");
+    const newDepHash = extractDependencyHash(newPkg?.content ?? "");
+    const dependenciesChanged = prevDepHash !== newDepHash;
+
+    this.currentFilesSnapshot = normalizedEntries;
+
+    // If package.json dependencies changed, trigger dependency check & reinstall
+    if (dependenciesChanged) {
       this.appendLog(
-        "[Foundry WebContainer] package.json was modified. Reinstalling dependencies...",
+        "[Foundry WebContainer] package.json dependencies changed. Reinstalling dependencies...",
         {
           level: "info",
           source: "installer",
-          eventType: "package_json_changed",
+          eventType: "package_json_dependencies_changed",
         },
       );
       const installed = await this.installDependencies(normalizedFiles, true);

@@ -2,7 +2,14 @@
 
 import { requireUser } from "@/lib/auth/session";
 import { db } from "@/lib/db";
-import { verificationRun, runtimeLog } from "@/lib/db/schema";
+import {
+  verificationRun,
+  runtimeLog,
+  projectFile,
+  projectVersion,
+  project,
+} from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 import { getProjectByIdForUser, type ActionResponse } from "./project";
 import { validateGeneratedFiles } from "@/lib/ai/validator";
 import {
@@ -157,6 +164,32 @@ export async function recordVerificationRunAction(
           occurredAt: new Date(),
         })
         .onConflictDoNothing();
+
+      // 3. Update Project Status truthfully based on verification outcome
+      let projectStatus = "verified";
+      if (ver.status === "verified_with_warnings") {
+        projectStatus = "verified_with_warnings";
+      } else if (ver.status === "failed") {
+        const hasToolchain = ver.diagnostics.some(
+          (d) => d.code === "TOOLCHAIN_UNAVAILABLE" || d.source === "toolchain",
+        );
+        const hasTimeout = ver.diagnostics.some((d) => d.code === "TIMEOUT");
+        if (hasToolchain) {
+          projectStatus = "verification_toolchain_unavailable";
+        } else if (hasTimeout) {
+          projectStatus = "verification_timeout";
+        } else {
+          projectStatus = "verification_failed";
+        }
+      }
+
+      await db
+        .update(project)
+        .set({
+          generationStatus: projectStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(project.id, trimmedProjectId));
     } catch (err) {
       console.error(
         "[Foundry Verification] Non-blocking database persistence error:",
@@ -259,7 +292,9 @@ export async function repairVerificationErrorsAction(
     const parsed = extractStructuredOutput(text);
 
     // Validate generated files through zero-trust sandbox validator
-    const validation = validateGeneratedFiles(parsed.files);
+    const validation = validateGeneratedFiles(parsed.files, {
+      existingFiles: input.currentFiles,
+    });
     if (!validation.valid) {
       return {
         success: false,
@@ -268,29 +303,89 @@ export async function repairVerificationErrorsAction(
       };
     }
 
-    // Persist repair audit log
+    // Persist repair results transactionally: files, version snapshot, audit log
     if (process.env.DATABASE_URL) {
       try {
-        await db.insert(runtimeLog).values({
-          id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          projectId: trimmedProjectId,
-          userId: user.id,
-          runtimeSessionId: `repair_att_${input.attemptNumber}`,
-          operationId: "self_repair",
-          level: "info",
-          source: "backend",
-          eventType: "self_repair_executed",
-          message: `Self-repair attempt ${input.attemptNumber} completed via ${modelId}`,
-          details: JSON.stringify({
-            attemptNumber: input.attemptNumber,
-            model: modelId,
-            repairedFiles: validation.files.map((f) => f.path),
-            summary: parsed.summary,
-          }),
-          occurredAt: new Date(),
+        await db.transaction(async (tx) => {
+          // a. Upsert validated repaired files
+          for (const file of validation.files) {
+            await tx
+              .insert(projectFile)
+              .values({
+                id: `file_${trimmedProjectId}_${Math.random().toString(36).substring(2, 9)}`,
+                projectId: trimmedProjectId,
+                path: file.path,
+                content: file.content,
+              })
+              .onConflictDoUpdate({
+                target: [projectFile.projectId, projectFile.path],
+                set: {
+                  content: file.content,
+                  updatedAt: new Date(),
+                },
+              });
+          }
+
+          // b. Create new version snapshot preserving history
+          const allCurrentFiles = await tx
+            .select({ path: projectFile.path, content: projectFile.content })
+            .from(projectFile)
+            .where(eq(projectFile.projectId, trimmedProjectId));
+
+          const snapshotMap: Record<string, string> = {};
+          for (const f of allCurrentFiles) {
+            snapshotMap[f.path] = f.content;
+          }
+
+          const existingVersions = await tx
+            .select({ id: projectVersion.id })
+            .from(projectVersion)
+            .where(eq(projectVersion.projectId, trimmedProjectId));
+
+          const nextVerNumber = `v${existingVersions.length + 1}-repair-${input.attemptNumber}`;
+
+          await tx.insert(projectVersion).values({
+            id: `ver_${trimmedProjectId}_${nextVerNumber}`,
+            projectId: trimmedProjectId,
+            versionNumber: nextVerNumber,
+            prompt: `Self-repair attempt ${input.attemptNumber}: ${parsed.summary}`,
+            snapshot: JSON.stringify(snapshotMap),
+          });
+
+          // c. Insert runtimeLog audit record
+          await tx.insert(runtimeLog).values({
+            id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            projectId: trimmedProjectId,
+            userId: user.id,
+            runtimeSessionId: `repair_att_${input.attemptNumber}`,
+            operationId: "self_repair",
+            level: "info",
+            source: "backend",
+            eventType: "self_repair_executed",
+            message: `Self-repair attempt ${input.attemptNumber} completed and persisted (${validation.files.length} files) via ${modelId}`,
+            details: JSON.stringify({
+              attemptNumber: input.attemptNumber,
+              model: modelId,
+              repairedFiles: validation.files.map((f) => f.path),
+              summary: parsed.summary,
+            }),
+            occurredAt: new Date(),
+          });
+
+          // d. Set project status to verifying
+          await tx
+            .update(project)
+            .set({
+              generationStatus: "verifying",
+              updatedAt: new Date(),
+            })
+            .where(eq(project.id, trimmedProjectId));
         });
-      } catch {
-        // Non-blocking log persistence
+      } catch (dbErr) {
+        console.error(
+          "[Foundry Repair] Failed to persist repaired files to database:",
+          dbErr,
+        );
       }
     }
 

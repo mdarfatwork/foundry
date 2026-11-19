@@ -1,5 +1,3 @@
-import { FOUNDRY_DIAGNOSTIC_BRIDGE_SCRIPT } from "@/lib/verification/bridge-script";
-
 /**
  * Reusable starter template definition for Foundry projects.
  * Next.js 16 + React 19 + Tailwind CSS v4 + Base UI (shadcn base-nova).
@@ -107,7 +105,20 @@ export function getStarterTemplateFiles(
       path: "next.config.ts",
       content: `import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "images.unsplash.com",
+      },
+      {
+        protocol: "https",
+        hostname: "plus.unsplash.com",
+      },
+    ],
+  },
+};
 
 export default nextConfig;
 `,
@@ -245,8 +256,239 @@ export default eslintConfig;
 `,
     },
     {
+      path: "components/preview-diagnostics.tsx",
+      content: `"use client";
+
+import { useEffect } from "react";
+
+export function PreviewDiagnostics() {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const w = window as unknown as { __FOUNDRY_BRIDGE_INSTALLED__?: boolean };
+    if (w.__FOUNDRY_BRIDGE_INSTALLED__) return;
+    w.__FOUNDRY_BRIDGE_INSTALLED__ = true;
+
+    const seenDiagnostics = new Set<string>();
+
+    function safeStringify(val: unknown): string {
+      if (val === null || val === undefined) return String(val);
+      if (typeof val === "string") return val;
+      if (val instanceof Error) return val.message + (val.stack ? "\\n" + val.stack : "");
+      try {
+        return JSON.stringify(val);
+      } catch {
+        return String(val);
+      }
+    }
+
+    function postDiagnostic(payload: {
+      source: string;
+      severity: string;
+      message: string;
+      stack?: string;
+      componentStack?: string;
+      url?: string;
+      line?: number;
+      column?: number;
+    }) {
+      try {
+        const key = payload.source + ":" + payload.severity + ":" + payload.message.slice(0, 160);
+        if (seenDiagnostics.has(key)) return;
+        seenDiagnostics.add(key);
+
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(
+            {
+              type: "FOUNDRY_PREVIEW_DIAGNOSTIC",
+              ...payload,
+              url: payload.url || window.location.href,
+              timestamp: Date.now(),
+            },
+            "*",
+          );
+        }
+      } catch {
+        // Safe execution
+      }
+    }
+
+    const origError = console.error;
+    const origWarn = console.warn;
+
+    console.error = function (...args: unknown[]) {
+      origError.apply(console, args);
+      const joined = args.map(safeStringify).join(" ");
+      const isReactWarning =
+        joined.indexOf("Warning:") === 0 ||
+        joined.indexOf("React does not recognize") !== -1;
+      let componentStack: string | undefined;
+      for (let i = 1; i < args.length; i++) {
+        if (typeof args[i] === "string" && (args[i] as string).indexOf("\\n    in ") !== -1) {
+          componentStack = args[i] as string;
+          break;
+        }
+      }
+      postDiagnostic({
+        source: isReactWarning ? "react_warning" : "browser_console",
+        severity: "error",
+        message: joined,
+        componentStack,
+      });
+    };
+
+    console.warn = function (...args: unknown[]) {
+      origWarn.apply(console, args);
+      const joined = args.map(safeStringify).join(" ");
+      const isReactWarning =
+        joined.indexOf("Warning:") === 0 ||
+        joined.indexOf("React does not recognize") !== -1;
+      let componentStack: string | undefined;
+      for (let i = 1; i < args.length; i++) {
+        if (typeof args[i] === "string" && (args[i] as string).indexOf("\\n    in ") !== -1) {
+          componentStack = args[i] as string;
+          break;
+        }
+      }
+      postDiagnostic({
+        source: isReactWarning ? "react_warning" : "browser_console",
+        severity: "warn",
+        message: joined,
+        componentStack,
+      });
+    };
+
+    const errorHandler = (event: ErrorEvent) => {
+      if (
+        event.target &&
+        ((event.target as HTMLElement).tagName === "IMG" ||
+          (event.target as HTMLElement).tagName === "SCRIPT" ||
+          (event.target as HTMLElement).tagName === "LINK")
+      ) {
+        const el = event.target as HTMLImageElement;
+        const src = el.src || (el as unknown as { href?: string }).href || "unknown";
+        postDiagnostic({
+          source: "network",
+          severity: "error",
+          message: "Failed to load resource: " + el.tagName.toLowerCase() + " (" + src + ")",
+          url: src,
+        });
+        return;
+      }
+
+      postDiagnostic({
+        source: "runtime_exception",
+        severity: "error",
+        message: event.message || "Uncaught JavaScript exception",
+        stack: event.error && event.error.stack ? event.error.stack : undefined,
+        url: event.filename,
+        line: event.lineno,
+        column: event.colno,
+      });
+    };
+
+    const rejectionHandler = (event: PromiseRejectionEvent) => {
+      postDiagnostic({
+        source: "runtime_exception",
+        severity: "error",
+        message: "Unhandled promise rejection: " + safeStringify(event.reason),
+        stack: event.reason && event.reason.stack ? event.reason.stack : undefined,
+      });
+    };
+
+    window.addEventListener("error", errorHandler, true);
+    window.addEventListener("unhandledrejection", rejectionHandler);
+
+    function runSmokeTests() {
+      try {
+        const items = [];
+        const start = Date.now();
+
+        const mainEl = document.querySelector("main") || document.body;
+        const hasRootContent = Boolean(
+          mainEl && mainEl.children.length > 0 && (mainEl.textContent || "").trim().length > 20,
+        );
+        items.push({
+          id: "root_content",
+          name: "Main page content rendered",
+          status: hasRootContent ? "passed" : "failed",
+          message: hasRootContent
+            ? "Root container rendered meaningful content"
+            : "Page rendered empty or minimal content",
+        });
+
+        const docEl = document.documentElement;
+        const hasOverflow = docEl.scrollWidth > window.innerWidth + 2;
+        items.push({
+          id: "layout_overflow",
+          name: "No horizontal layout overflow",
+          status: hasOverflow ? "failed" : "passed",
+          message: hasOverflow
+            ? "Page has horizontal overflow (" + docEl.scrollWidth + "px > " + window.innerWidth + "px)"
+            : "Layout fits within viewport width",
+        });
+
+        const images = Array.from(document.querySelectorAll("img"));
+        const brokenImages = images.filter(
+          (img) => img.complete && img.naturalWidth === 0 && img.src && !img.src.startsWith("data:"),
+        );
+        items.push({
+          id: "image_assets",
+          name: "Image assets loaded successfully",
+          status: brokenImages.length > 0 ? "failed" : "passed",
+          message:
+            brokenImages.length > 0
+              ? brokenImages.length + " broken images detected on page"
+              : images.length + " images verified",
+        });
+
+        const interactiveCount = document.querySelectorAll("button, a, input, select, textarea").length;
+        items.push({
+          id: "interactive_elements",
+          name: "Interactive navigation and controls present",
+          status: "passed",
+          message: interactiveCount + " interactive elements detected",
+        });
+
+        const allPassed = items.every((item) => item.status === "passed");
+
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(
+            {
+              type: "FOUNDRY_PREVIEW_SMOKE_RESULT",
+              summary: {
+                passed: allPassed,
+                items,
+                durationMs: Date.now() - start,
+              },
+              timestamp: Date.now(),
+            },
+            "*",
+          );
+        }
+      } catch {
+        // Safe smoke test execution
+      }
+    }
+
+    const timer = setTimeout(runSmokeTests, 1200);
+
+    return () => {
+      clearTimeout(timer);
+      console.error = origError;
+      console.warn = origWarn;
+      window.removeEventListener("error", errorHandler, true);
+      window.removeEventListener("unhandledrejection", rejectionHandler);
+    };
+  }, []);
+
+  return null;
+}
+`,
+    },
+    {
       path: "app/layout.tsx",
       content: `import type { Metadata } from "next";
+import { PreviewDiagnostics } from "@/components/preview-diagnostics";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -261,14 +503,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: ${JSON.stringify(FOUNDRY_DIAGNOSTIC_BRIDGE_SCRIPT)},
-          }}
-        />
-      </head>
       <body className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-foreground selection:text-background">
+        <PreviewDiagnostics />
         {children}
       </body>
     </html>
@@ -362,12 +598,18 @@ const buttonVariants = cva(
   },
 );
 
+type ButtonProps = ButtonPrimitive.Props &
+  VariantProps<typeof buttonVariants> & {
+    readonly asChild?: boolean;
+  };
+
 function Button({
   className,
   variant = "default",
   size = "default",
+  asChild: _ignoredAsChild,
   ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+}: ButtonProps) {
   return (
     <ButtonPrimitive
       data-slot="button"

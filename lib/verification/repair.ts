@@ -103,6 +103,9 @@ export function canAttemptRepair(
   const hasFixableError = diagnostics.some(
     (d) =>
       d.fixable &&
+      d.code !== "TIMEOUT" &&
+      d.code !== "TOOLCHAIN_UNAVAILABLE" &&
+      d.source !== "toolchain" &&
       (d.severity === "error" ||
         d.severity === "fatal" ||
         (d.severity === "warning" && d.source === "react_warning")),

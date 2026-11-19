@@ -56,6 +56,92 @@ export function inferRecipeFromPrompt(prompt: string): DesignRecipeId {
   return "saas";
 }
 
+export function extractRequestedSectionsFromPrompt(prompt: string): string[] {
+  const p = prompt.toLowerCase();
+  const is10Section = /10[-\s]*(?:landing[-\s]*page)?\s*sections?/i.test(p);
+  const isFurnitureShowroom = /furniture|showroom|interior/i.test(p);
+
+  if (is10Section && isFurnitureShowroom) {
+    return [
+      "navbar",
+      "hero",
+      "categories",
+      "about",
+      "collection",
+      "craftsmanship",
+      "showroom",
+      "why-us",
+      "testimonials",
+      "cta",
+      "footer",
+    ];
+  }
+
+  const standardPool = [
+    { key: "navbar", regex: /\b(nav|navbar|header|navigation)\b/i },
+    { key: "hero", regex: /\b(hero|intro|banner)\b/i },
+    { key: "categories", regex: /\b(categories|category)\b/i },
+    { key: "about", regex: /\b(about|story|vision|heritage)\b/i },
+    { key: "features", regex: /\b(features|highlights)\b/i },
+    { key: "collection", regex: /\b(collection|products|catalog|gallery)\b/i },
+    { key: "craftsmanship", regex: /\b(craftsmanship|materials|quality)\b/i },
+    { key: "showroom", regex: /\b(showroom|spaces|exhibition)\b/i },
+    { key: "why-us", regex: /\b(why[-\s]*us|benefits|advantages)\b/i },
+    { key: "pricing", regex: /\b(pricing|plans)\b/i },
+    { key: "testimonials", regex: /\b(testimonials|reviews|proof)\b/i },
+    { key: "faq", regex: /\b(faq|questions)\b/i },
+    { key: "cta", regex: /\b(cta|call to action|contact|newsletter)\b/i },
+    { key: "footer", regex: /\b(footer)\b/i },
+  ];
+
+  const matched: string[] = [];
+  for (const item of standardPool) {
+    if (item.regex.test(p)) {
+      matched.push(item.key);
+    }
+  }
+
+  if (is10Section) {
+    const full10 = [
+      "navbar",
+      "hero",
+      "categories",
+      "about",
+      "collection",
+      "features",
+      "why-us",
+      "testimonials",
+      "cta",
+      "footer",
+    ];
+    return Array.from(new Set([...matched, ...full10])).slice(0, 10);
+  }
+
+  if (matched.length >= 3) {
+    if (!matched.includes("navbar")) matched.unshift("navbar");
+    if (!matched.includes("footer")) matched.push("footer");
+    return Array.from(new Set(matched));
+  }
+
+  const recipe = inferRecipeFromPrompt(prompt);
+  if (recipe === "premium_product") {
+    return [
+      "navbar",
+      "hero",
+      "categories",
+      "about",
+      "collection",
+      "craftsmanship",
+      "why-us",
+      "testimonials",
+      "cta",
+      "footer",
+    ];
+  }
+
+  return ["navbar", "hero", "features", "about", "cta", "footer"];
+}
+
 function imageCatalogForBrief(brief?: DesignBrief | null): string {
   const recipe = brief?.recipe ?? "saas";
   const isInteriorOrFurniture =
@@ -107,11 +193,12 @@ function selectRelevantFiles(
 }
 
 export function buildDesignBriefPrompt(userPrompt: string): string {
-  return `Extract a concise design brief as JSON for this landing page request.
+  return `Extract a comprehensive design brief as JSON for this landing page request.
 Rules:
 - Choose exactly one recipe: editorial | premium_product | saas | local_business | creative_portfolio
 - Do not invent fake testimonials, logos, or statistics.
 - Be specific to the business in the prompt.
+- Crucial: Extract ALL sections requested by the user in the exact order requested. If the user explicitly asks for specific sections or an explicit number of sections (e.g. 10 sections), list all of them in the "sections" array.
 Return only JSON matching:
 {
   "businessType": "...",
@@ -123,7 +210,7 @@ Return only JSON matching:
   "typography": "...",
   "palette": "...",
   "imagery": "...",
-  "sections": ["hero","features","cta","footer"],
+  "sections": ["navbar","hero","features","cta","footer"],
   "interactions": "..."
 }
 
@@ -172,11 +259,13 @@ ${briefBlock}
 
 ### Architecture (multi-file, maintainable)
 - Root configs already exist — never emit package.json, tsconfig, next.config, lockfiles, or components.json.
-- MANDATORY: app/page.tsx MUST always be included as the FIRST file in the "files" array. It must import and render all section components (e.g. Navbar, Hero, Categories, About, Collection, WhyUs, Showroom, Testimonials, CTA, Footer).
+- MANDATORY: app/page.tsx MUST always be included as the FIRST file in the "files" array. It must import and render ALL section components in the exact order planned in the design brief.
+- SECTION COMPLETENESS IS STRICTLY ENFORCED: Every section in the brief (e.g. Navbar, Hero, Categories, About, Collection, Materials, Showroom, WhyUs, Testimonials, CTA, Footer) MUST have its corresponding component generated and MUST be rendered in app/page.tsx. Do NOT omit any section. A page rendering only 1 or 2 sections when multiple are requested will be rejected.
+- Each section component file in components/sections/<name>.tsx must explicitly export its component (e.g. 'export function Hero() { ... }' or 'export default function Hero() { ... }'). Import paths in app/page.tsx must match the exact exported names and paths.
 - Keep component implementations clean, modular, and focused so all requested sections fit completely within output token limits without truncation.
 - Structure:
   - app/page.tsx (composition only)
-  - components/sections/* for major sections (or combined clean modular files)
+  - components/sections/* for each section component
   - app/layout.tsx / app/globals.css when tokens or fonts must change
   - reuse components/ui/* and lib/utils.ts
 - Server Components by default. Add "use client" at the very top of any file with interactive state, hooks (useState, useEffect, useRef), browser APIs, or event handlers (onClick, onSubmit).

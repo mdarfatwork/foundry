@@ -226,12 +226,67 @@ export function verifyManifestAndFiles(
 export async function runTypecheckStage(
   container: WebContainer,
 ): Promise<VerificationStageResult> {
+  const start = Date.now();
+
+  // Verify local toolchain exists in virtual workspace without triggering npx package installation prompts
+  let hasTypeScript = false;
+  try {
+    const entries = await container.fs.readdir("node_modules/typescript");
+    hasTypeScript = entries.length > 0;
+  } catch {
+    hasTypeScript = false;
+  }
+
+  if (!hasTypeScript) {
+    return {
+      stage: "typecheck",
+      status: "failed",
+      durationMs: Date.now() - start,
+      diagnostics: [
+        {
+          id: "ts_toolchain_unavailable",
+          severity: "fatal",
+          source: "toolchain",
+          message:
+            "TypeScript compiler ('tsc') is not available in node_modules. Please wait for dependency installation to complete.",
+          code: "TOOLCHAIN_UNAVAILABLE",
+          fixable: false,
+          timestamp: Date.now(),
+        },
+      ],
+      output: "TypeScript toolchain missing in virtual workspace node_modules.",
+    };
+  }
+
   const cmdRes = await runWebContainerCommand(
     container,
-    "npx",
-    ["tsc", "--noEmit"],
+    "npm",
+    ["run", "typecheck"],
     45_000,
   );
+
+  const isTimeout = cmdRes.exitCode === -1 && /timed out/i.test(cmdRes.stderr);
+
+  if (isTimeout) {
+    return {
+      stage: "typecheck",
+      status: "failed",
+      durationMs: cmdRes.durationMs,
+      diagnostics: [
+        {
+          id: "ts_timeout",
+          severity: "error",
+          source: "typescript",
+          message: "TypeScript check timed out after 45s.",
+          code: "TIMEOUT",
+          fixable: false,
+          timestamp: Date.now(),
+        },
+      ],
+      output: cmdRes.stdout,
+    };
+  }
+
   const combinedOutput = `${cmdRes.stdout}\n${cmdRes.stderr}`;
   const diagnostics = parseTypeScriptDiagnostics(combinedOutput);
 
@@ -254,7 +309,7 @@ export async function runTypecheckStage(
           source: "typescript",
           message: `TypeScript check failed with code ${cmdRes.exitCode}: ${errorSnippet}`,
           code: "TSC_CHECK_FAILED",
-          fixable: true,
+          fixable: false,
           timestamp: Date.now(),
         },
       ],
@@ -282,12 +337,67 @@ export async function runTypecheckStage(
 export async function runLintStage(
   container: WebContainer,
 ): Promise<VerificationStageResult> {
+  const start = Date.now();
+
+  // Verify local ESLint exists in virtual workspace without triggering npx package installation prompts
+  let hasEslint = false;
+  try {
+    const entries = await container.fs.readdir("node_modules/eslint");
+    hasEslint = entries.length > 0;
+  } catch {
+    hasEslint = false;
+  }
+
+  if (!hasEslint) {
+    return {
+      stage: "lint",
+      status: "failed",
+      durationMs: Date.now() - start,
+      diagnostics: [
+        {
+          id: "eslint_toolchain_unavailable",
+          severity: "fatal",
+          source: "toolchain",
+          message:
+            "ESLint is not available in node_modules. Please wait for dependency installation to complete.",
+          code: "TOOLCHAIN_UNAVAILABLE",
+          fixable: false,
+          timestamp: Date.now(),
+        },
+      ],
+      output: "ESLint toolchain missing in virtual workspace node_modules.",
+    };
+  }
+
   const cmdRes = await runWebContainerCommand(
     container,
-    "npx",
-    ["eslint", "app", "components", "lib", "--format", "stylish"],
+    "npm",
+    ["run", "lint", "--", "app", "components", "lib", "--format", "stylish"],
     35_000,
   );
+
+  const isTimeout = cmdRes.exitCode === -1 && /timed out/i.test(cmdRes.stderr);
+
+  if (isTimeout) {
+    return {
+      stage: "lint",
+      status: "failed",
+      durationMs: cmdRes.durationMs,
+      diagnostics: [
+        {
+          id: "eslint_timeout",
+          severity: "error",
+          source: "eslint",
+          message: "ESLint check timed out after 35s.",
+          code: "TIMEOUT",
+          fixable: false,
+          timestamp: Date.now(),
+        },
+      ],
+      output: cmdRes.stdout,
+    };
+  }
+
   const combinedOutput = `${cmdRes.stdout}\n${cmdRes.stderr}`;
   const diagnostics = parseESLintDiagnostics(combinedOutput);
 
@@ -310,7 +420,7 @@ export async function runLintStage(
           source: "eslint",
           message: `ESLint check failed with code ${cmdRes.exitCode}: ${errorSnippet}`,
           code: "ESLINT_CHECK_FAILED",
-          fixable: true,
+          fixable: false,
           timestamp: Date.now(),
         },
       ],
